@@ -34,7 +34,7 @@ pnpm dev
 4. 本地对同一库执行一次 `pnpm db:push`。
 5. 推送分支获取 Preview URL。
 
-注意：Vercel Cron 仅在 Production 运行；本项目以读时结算为主，Preview 可完整试玩。
+注意：本项目以读时结算为主，Preview / 本地不跑 Cron 也可完整试玩。Production 上 Vercel Cron 为每天 UTC 00:00 触发一次 `/api/cron/tick`（Hobby 允许的每日频率），仅作全服兜底结算。
 
 ## 玩法摘要
 
