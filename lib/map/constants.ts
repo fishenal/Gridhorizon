@@ -4,7 +4,7 @@ export const VISION_RADIUS = 20;
 export const CHUNK_SIZE = 32;
 
 export const TRAVEL_SECONDS_PER_TILE = Number(
-  process.env.TRAVEL_SECONDS_PER_TILE ?? "3",
+  process.env.TRAVEL_SECONDS_PER_TILE ?? "1",
 );
 
 export const WORLD_SEED = Number(process.env.WORLD_SEED ?? "424242");

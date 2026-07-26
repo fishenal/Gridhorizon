@@ -13,31 +13,15 @@ import {
   WAYPOINT_TOLL,
 } from "@/lib/map/constants";
 import { markExploredCells, shareExploration } from "@/lib/map/explore";
+import {
+  buildDirectionalPath,
+  buildPath,
+  clampToMap,
+  type Point,
+} from "@/lib/game/path";
 
-export type Point = { x: number; y: number };
-
-export function clampToMap(x: number, y: number): Point {
-  return {
-    x: Math.max(0, Math.min(MAP_SIZE - 1, Math.round(x))),
-    y: Math.max(0, Math.min(MAP_SIZE - 1, Math.round(y))),
-  };
-}
-
-/** 4-directional path (Manhattan). */
-export function buildPath(from: Point, to: Point): Point[] {
-  const path: Point[] = [{ x: from.x, y: from.y }];
-  let x = from.x;
-  let y = from.y;
-  while (x !== to.x) {
-    x += x < to.x ? 1 : -1;
-    path.push({ x, y });
-  }
-  while (y !== to.y) {
-    y += y < to.y ? 1 : -1;
-    path.push({ x, y });
-  }
-  return path;
-}
+export type { Point } from "@/lib/game/path";
+export { buildDirectionalPath, buildPath, clampToMap } from "@/lib/game/path";
 
 function cellsInVision(cx: number, cy: number): Point[] {
   const cells: Point[] = [];
@@ -218,4 +202,90 @@ export async function startTravel(
     steps,
     etaSeconds: steps * TRAVEL_SECONDS_PER_TILE,
   };
+}
+
+export async function startDirectionalTravel(
+  db: Db,
+  playerId: number,
+  dx: number,
+  dy: number,
+  steps: number,
+): Promise<{ ok: true; steps: number; etaSeconds: number } | { ok: false; error: string }> {
+  if (dx === 0 && dy === 0) {
+    return { ok: false, error: "Need a direction" };
+  }
+  if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+    return { ok: false, error: "Invalid direction" };
+  }
+  if (steps < 1 || steps > 500) {
+    return { ok: false, error: "Steps must be 1–500" };
+  }
+
+  const player = await db.query.players.findFirst({
+    where: eq(players.id, playerId),
+  });
+  if (!player) return { ok: false, error: "Player not found" };
+
+  await settleTravel(db, playerId);
+
+  const refreshed = await db.query.players.findFirst({
+    where: eq(players.id, playerId),
+  });
+  if (!refreshed) return { ok: false, error: "Player not found" };
+
+  const path = buildDirectionalPath(
+    { x: refreshed.x, y: refreshed.y },
+    dx,
+    dy,
+    steps,
+  );
+  const moved = path.length - 1;
+  if (moved <= 0) {
+    return { ok: false, error: "Cannot move that way (map edge)" };
+  }
+
+  const now = new Date();
+  await db.delete(travelJobs).where(eq(travelJobs.playerId, playerId));
+  await db.insert(travelJobs).values({
+    playerId,
+    pathJson: JSON.stringify(path),
+    pathIndex: 0,
+    startedAt: now,
+    lastSettledAt: now,
+  });
+  await db
+    .update(players)
+    .set({ status: "traveling" })
+    .where(eq(players.id, playerId));
+
+  await markExploredCells(db, playerId, cellsInVision(refreshed.x, refreshed.y));
+
+  return {
+    ok: true,
+    steps: moved,
+    etaSeconds: moved * TRAVEL_SECONDS_PER_TILE,
+  };
+}
+
+/** Client-authoritative stop: park at (x,y), clear travel job. */
+export async function stopTravel(
+  db: Db,
+  playerId: number,
+  x: number,
+  y: number,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const player = await db.query.players.findFirst({
+    where: eq(players.id, playerId),
+  });
+  if (!player) return { ok: false, error: "Player not found" };
+
+  const pos = clampToMap(x, y);
+  await db.delete(travelJobs).where(eq(travelJobs.playerId, playerId));
+  await db
+    .update(players)
+    .set({ x: pos.x, y: pos.y, status: "idle" })
+    .where(eq(players.id, playerId));
+  await markExploredCells(db, playerId, cellsInVision(pos.x, pos.y));
+
+  return { ok: true };
 }

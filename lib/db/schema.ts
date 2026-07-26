@@ -15,6 +15,7 @@ export const players = pgTable("players", {
   x: integer("x").notNull().default(2500),
   y: integer("y").notNull().default(2500),
   gold: integer("gold").notNull().default(200),
+  xp: integer("xp").notNull().default(0),
   stone: integer("stone").notNull().default(0),
   wood: integer("wood").notNull().default(0),
   ore: integer("ore").notNull().default(0),

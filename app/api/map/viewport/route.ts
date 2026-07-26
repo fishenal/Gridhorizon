@@ -9,6 +9,7 @@ import { loadExploredSet } from "@/lib/map/explore";
 import { generateTile } from "@/lib/map/generator";
 
 export async function GET(req: Request) {
+  try {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -137,4 +138,8 @@ export async function GET(req: Request) {
     tiles,
     players: visibleOthers,
   });
+  } catch (err) {
+    console.error("[api/map/viewport]", err);
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+  }
 }
