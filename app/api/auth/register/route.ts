@@ -11,6 +11,7 @@ import {
 } from "@/lib/map/constants";
 import { markExploredCells } from "@/lib/map/explore";
 import { VISION_RADIUS } from "@/lib/map/constants";
+import { DEFAULT_MAP_ID, ensureDefaultMap } from "@/lib/map/world";
 
 const bodySchema = z.object({
   name: z.string().trim().min(2).max(24),
@@ -27,6 +28,7 @@ export async function POST(req: Request) {
 
     const { name, password } = parsed.data;
     const db = getDb();
+    await ensureDefaultMap(db);
 
     const existing = await db.query.players.findFirst({
       where: eq(players.name, name),
@@ -44,6 +46,7 @@ export async function POST(req: Request) {
       .values({
         name,
         passwordHash,
+        currentMapId: DEFAULT_MAP_ID,
         x: MAP_CENTER,
         y: MAP_CENTER,
         gold: INITIAL_GOLD,
@@ -55,7 +58,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Create failed" }, { status: 500 });
     }
 
-    // Reveal spawn vision
     const cells: Array<{ x: number; y: number }> = [];
     const r2 = VISION_RADIUS * VISION_RADIUS;
     for (let dy = -VISION_RADIUS; dy <= VISION_RADIUS; dy++) {
@@ -64,7 +66,7 @@ export async function POST(req: Request) {
         cells.push({ x: MAP_CENTER + dx, y: MAP_CENTER + dy });
       }
     }
-    await markExploredCells(db, created.id, cells);
+    await markExploredCells(db, created.id, cells, DEFAULT_MAP_ID);
 
     return NextResponse.json({ ok: true, id: created.id, name: created.name });
   } catch (e) {

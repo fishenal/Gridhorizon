@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { MAX_TRAVEL_STEPS } from "@/lib/map/constants";
 
 const DIRS: Array<{ dx: number; dy: number; label: string } | null> = [
   { dx: -1, dy: -1, label: "↖" },
@@ -40,14 +41,21 @@ export function MovePad({
   const [dy, setDy] = useState(-1);
   const [steps, setSteps] = useState(10);
   const [submitting, setSubmitting] = useState(false);
+  const [stepsError, setStepsError] = useState("");
 
   const locked = busy || traveling || submitting;
 
   async function handleMove() {
     if ((dx === 0 && dy === 0) || locked) return;
+    const n = Number(steps);
+    if (!Number.isFinite(n) || n < 1 || n > MAX_TRAVEL_STEPS) {
+      setStepsError(`步数须为 1–${MAX_TRAVEL_STEPS}`);
+      return;
+    }
+    setStepsError("");
     setSubmitting(true);
     try {
-      await onMove(dx, dy, Math.max(1, Math.min(500, steps || 1)));
+      await onMove(dx, dy, Math.floor(n));
     } finally {
       setSubmitting(false);
     }
@@ -99,11 +107,18 @@ export function MovePad({
                 key="steps"
                 type="number"
                 min={1}
-                max={500}
+                max={MAX_TRAVEL_STEPS}
                 value={steps}
                 disabled={locked}
-                onChange={(e) => setSteps(Number(e.target.value))}
-                className="h-10 w-full rounded border border-stone-300 bg-white text-center text-sm tabular-nums disabled:opacity-50"
+                onChange={(e) => {
+                  setSteps(Number(e.target.value));
+                  setStepsError("");
+                }}
+                className={`h-10 w-full rounded border bg-white text-center text-sm tabular-nums disabled:opacity-50 ${
+                  stepsError
+                    ? "border-rose-400"
+                    : "border-stone-300"
+                }`}
                 aria-label="移动格数"
               />
             );
@@ -130,6 +145,9 @@ export function MovePad({
           );
         })}
       </div>
+      {stepsError ? (
+        <p className="mt-1.5 text-center text-[11px] text-rose-600">{stepsError}</p>
+      ) : null}
       <button
         type="button"
         disabled={locked || (dx === 0 && dy === 0)}

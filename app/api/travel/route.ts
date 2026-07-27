@@ -7,6 +7,7 @@ import {
   startTravel,
   stopTravel,
 } from "@/lib/game/travel";
+import { MAX_TRAVEL_STEPS } from "@/lib/map/constants";
 
 const pointSchema = z.object({
   x: z.number().int(),
@@ -17,7 +18,7 @@ const directionSchema = z.object({
   mode: z.literal("direction"),
   dx: z.number().int().min(-1).max(1),
   dy: z.number().int().min(-1).max(1),
-  steps: z.number().int().min(1).max(500),
+  steps: z.number().int().min(1).max(MAX_TRAVEL_STEPS),
 });
 
 const stopSchema = z.object({

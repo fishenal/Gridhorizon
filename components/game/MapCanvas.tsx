@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 export type ViewportTile =
   | { x: number; y: number; fog: true }
@@ -35,16 +41,16 @@ export type SelectedEntity = {
 
 export type ScreenPoint = { x: number; y: number };
 
-export type MapClickPayload = {
-  x: number;
-  y: number;
-  entity: SelectedEntity | null;
-};
-
 export type ScreenAnchors = {
   tile: ScreenPoint | null;
   entity: ScreenPoint | null;
   cellSize: number;
+};
+
+type TileTip = {
+  label: string;
+  gx: number;
+  gy: number;
 };
 
 type Props = {
@@ -52,10 +58,11 @@ type Props = {
   center: { x: number; y: number };
   player: MapPlayer;
   others: MapPlayer[];
+  /** Play vision circle; tiles already encode inVision. Kept for API symmetry. */
   visionRadius: number;
-  selectedTile: { x: number; y: number } | null;
+  viewRadius: number;
   selectedEntityId: number | null;
-  onMapClick: (payload: MapClickPayload) => void;
+  onEntityHoverChange: (entity: SelectedEntity | null) => void;
   onAnchorsChange: (anchors: ScreenAnchors) => void;
 };
 
@@ -71,52 +78,26 @@ const AXIS_LEFT = 52;
 const AXIS_TOP = 32;
 const LABEL_STEP = 10;
 
-function drawPlayerAvatar(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  r: number,
-  highlight: boolean,
-) {
-  ctx.fillStyle = "#f5d76e";
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = highlight ? "#ff2d9b" : "#1a1a1a";
-  ctx.lineWidth = highlight ? Math.max(2, r * 0.18) : Math.max(1, r * 0.08);
-  ctx.stroke();
-
-  const eyeY = cy - r * 0.15;
-  const eyeR = Math.max(1.2, r * 0.1);
-  ctx.fillStyle = "#1a1a1a";
-  ctx.beginPath();
-  ctx.arc(cx - r * 0.28, eyeY, eyeR, 0, Math.PI * 2);
-  ctx.arc(cx + r * 0.28, eyeY, eyeR, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.beginPath();
-  ctx.strokeStyle = "#1a1a1a";
-  ctx.lineWidth = Math.max(1.2, r * 0.1);
-  ctx.arc(cx, cy + r * 0.1, r * 0.35, 0.15 * Math.PI, 0.85 * Math.PI);
-  ctx.stroke();
-}
-
 export function MapCanvas({
   tiles,
   center,
   player,
   others,
-  visionRadius,
-  selectedTile,
+  viewRadius,
   selectedEntityId,
-  onMapClick,
+  onEntityHoverChange,
   onAnchorsChange,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const entityRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const [box, setBox] = useState({ w: 640, h: 480 });
+  const [tileTip, setTileTip] = useState<TileTip | null>(null);
 
-  const gridSize = visionRadius * 2 + 1;
+  const gridSize = viewRadius * 2 + 1;
+  const minX = center.x - viewRadius;
+  const minY = center.y - viewRadius;
+  const maxX = center.x + viewRadius;
+  const maxY = center.y + viewRadius;
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -133,18 +114,18 @@ export function MapCanvas({
     return () => ro.disconnect();
   }, []);
 
-  const cell = Math.max(
-    4,
-    Math.floor(
-      Math.min((box.w - AXIS_LEFT) / gridSize, (box.h - AXIS_TOP) / gridSize),
-    ),
+  // Fixed pixel board for a given container; zoom only changes cell count/size
+  const mapSide = Math.max(
+    80,
+    Math.min(box.w - AXIS_LEFT, box.h - AXIS_TOP),
   );
+  const cell = Math.max(2, Math.floor(mapSide / gridSize));
   const mapW = gridSize * cell;
   const mapH = gridSize * cell;
-  const canvasW = AXIS_LEFT + mapW;
-  const canvasH = AXIS_TOP + mapH;
-  const avatarR = Math.max(7, cell * 0.55);
-  const otherR = Math.max(3, cell * 0.32);
+  const boardW = AXIS_LEFT + mapW;
+  const boardH = AXIS_TOP + mapH;
+  const avatarSize = Math.max(10, Math.min(cell * 1.15, cell + 10));
+  const otherSize = Math.max(6, Math.min(cell * 0.75, cell + 4));
 
   const tileMap = useMemo(() => {
     const m = new Map<string, ViewportTile>();
@@ -152,342 +133,272 @@ export function MapCanvas({
     return m;
   }, [tiles]);
 
-  const allUnits = useMemo(() => {
-    const list: MapPlayer[] = [
-      { id: player.id, name: player.name, x: player.x, y: player.y },
-      ...others,
-    ];
-    return list;
-  }, [player.id, player.name, player.x, player.y, others]);
-
-  function worldToWrap(wx: number, wy: number): ScreenPoint | null {
-    const cx = Number(center.x);
-    const cy = Number(center.y);
-    const r = Number(visionRadius);
-    const gx = Number(wx) - cx + r;
-    const gy = Number(wy) - cy + r;
-    if (
-      !Number.isFinite(gx) ||
-      !Number.isFinite(gy) ||
-      gx < 0 ||
-      gy < 0 ||
-      gx >= gridSize ||
-      gy >= gridSize
-    ) {
-      return null;
-    }
-
-    const wrap = wrapRef.current;
-    const canvas = canvasRef.current;
-    if (!wrap || !canvas || !canvas.width || !canvas.height) {
-      const canvasOffsetLeft = (box.w - canvasW) / 2;
-      const canvasOffsetTop = (box.h - canvasH) / 2;
-      return {
-        x: canvasOffsetLeft + AXIS_LEFT + gx * cell + cell / 2,
-        y: canvasOffsetTop + AXIS_TOP + gy * cell + cell / 2,
-      };
-    }
-
-    const wr = wrap.getBoundingClientRect();
-    const cr = canvas.getBoundingClientRect();
-    const scaleX = cr.width / canvas.width;
-    const scaleY = cr.height / canvas.height;
-    const x = cr.left - wr.left + (AXIS_LEFT + gx * cell + cell / 2) * scaleX;
-    const y = cr.top - wr.top + (AXIS_TOP + gy * cell + cell / 2) * scaleY;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-    return { x, y };
-  }
-
-  function worldCenterCanvas(wx: number, wy: number) {
-    const gx = wx - center.x + visionRadius;
-    const gy = wy - center.y + visionRadius;
-    return {
-      cx: AXIS_LEFT + gx * cell + cell / 2,
-      cy: AXIS_TOP + gy * cell + cell / 2,
-      inView: gx >= 0 && gy >= 0 && gx < gridSize && gy < gridSize,
-    };
-  }
-
-  const selectedTileX = selectedTile?.x ?? null;
-  const selectedTileY = selectedTile?.y ?? null;
-  const entityUnit =
-    selectedEntityId == null
-      ? null
-      : allUnits.find((u) => u.id === selectedEntityId) ?? null;
-
-  useLayoutEffect(() => {
-    const publish = () => {
-      const next: ScreenAnchors = {
-        tile: null,
-        entity: null,
-        cellSize: cell,
-      };
-      if (selectedTileX != null && selectedTileY != null) {
-        next.tile = worldToWrap(selectedTileX, selectedTileY);
-      }
-      if (entityUnit) {
-        next.entity = worldToWrap(entityUnit.x, entityUnit.y);
-      }
-      onAnchorsChange(next);
-    };
-    publish();
-    const id = requestAnimationFrame(publish);
-    return () => cancelAnimationFrame(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- scalars only; worldToWrap uses current layout
-  }, [
-    selectedTileX,
-    selectedTileY,
-    selectedEntityId,
-    entityUnit?.x,
-    entityUnit?.y,
-    center.x,
-    center.y,
-    visionRadius,
-    cell,
-    canvasW,
-    canvasH,
-    box.w,
-    box.h,
-    gridSize,
-    onAnchorsChange,
-  ]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    ctx.clearRect(0, 0, canvasW, canvasH);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, canvasW, canvasH);
-
-    ctx.fillStyle = "#3d9ec9";
-    ctx.fillRect(AXIS_LEFT, AXIS_TOP, mapW, mapH);
-
+  const cells = useMemo(() => {
+    const list: Array<{
+      key: string;
+      wx: number;
+      wy: number;
+      gx: number;
+      gy: number;
+      bg: string;
+      dim: boolean;
+    }> = [];
     for (let gy = 0; gy < gridSize; gy++) {
       for (let gx = 0; gx < gridSize; gx++) {
-        const wx = center.x - visionRadius + gx;
-        const wy = center.y - visionRadius + gy;
+        const wx = minX + gx;
+        const wy = minY + gy;
         const t = tileMap.get(`${wx},${wy}`);
-        const px = AXIS_LEFT + gx * cell;
-        const py = AXIS_TOP + gy * cell;
-
         if (!t || t.fog) {
-          ctx.fillStyle = "#1a1a1a";
-          ctx.fillRect(px, py, cell, cell);
+          list.push({
+            key: `${wx},${wy}`,
+            wx,
+            wy,
+            gx,
+            gy,
+            bg: "#1a1a1a",
+            dim: false,
+          });
         } else {
-          ctx.fillStyle = TERRAIN_COLOR[t.terrain] ?? "#444";
-          ctx.fillRect(px, py, cell, cell);
-
-          if (!t.inVision) {
-            ctx.fillStyle = "rgba(0,0,0,0.45)";
-            ctx.fillRect(px, py, cell, cell);
-          }
-
-          if (t.resourceType !== "none") {
-            const s = Math.max(3, cell * 0.35);
-            ctx.fillStyle = "#f5d76e";
-            ctx.fillRect(
-              px + (cell - s) / 2,
-              py + (cell - s) / 2,
-              s,
-              s,
-            );
-          }
-
-          if (t.building) {
-            const colors: Record<string, string> = {
-              mine: "#b85c38",
-              farm: "#8fbc5a",
-              fishery: "#4a90a4",
-              town: "#c45c26",
-              waypoint: "#e8e8e8",
-            };
-            ctx.fillStyle = colors[t.building.type] ?? "#fff";
-            ctx.beginPath();
-            ctx.arc(
-              px + cell / 2,
-              py + cell / 2,
-              Math.max(2, cell * 0.28),
-              0,
-              Math.PI * 2,
-            );
-            ctx.fill();
-          } else if (t.claim) {
-            ctx.strokeStyle = "rgba(255,255,255,0.75)";
-            ctx.lineWidth = 1;
-            ctx.strokeRect(px + 1, py + 1, cell - 2, cell - 2);
-          }
+          list.push({
+            key: `${wx},${wy}`,
+            wx,
+            wy,
+            gx,
+            gy,
+            bg: TERRAIN_COLOR[t.terrain] ?? "#444",
+            dim: !t.inVision,
+          });
         }
-
-        ctx.strokeStyle = "#111111";
-        ctx.lineWidth = 1;
-        ctx.strokeRect(px + 0.5, py + 0.5, cell - 1, cell - 1);
       }
     }
+    return list;
+  }, [tileMap, gridSize, minX, minY]);
 
-    ctx.fillStyle = "#e11d8f";
-    ctx.font = `bold ${Math.max(10, Math.min(13, AXIS_TOP * 0.38))}px ui-sans-serif, system-ui, sans-serif`;
-    ctx.textBaseline = "middle";
-
-    const minX = center.x - visionRadius;
-    const maxX = center.x + visionRadius;
-    const minY = center.y - visionRadius;
-    const maxY = center.y + visionRadius;
-
-    ctx.textAlign = "center";
+  const xLabels = useMemo(() => {
+    const out: Array<{ wx: number; gx: number }> = [];
     for (
       let wx = Math.ceil(minX / LABEL_STEP) * LABEL_STEP;
       wx <= maxX;
       wx += LABEL_STEP
     ) {
-      const gx = wx - minX;
-      const px = AXIS_LEFT + gx * cell + cell / 2;
-      ctx.fillText(String(wx), px, AXIS_TOP / 2);
+      out.push({ wx, gx: wx - minX });
     }
+    return out;
+  }, [minX, maxX]);
 
-    ctx.textAlign = "right";
+  const yLabels = useMemo(() => {
+    const out: Array<{ wy: number; gy: number }> = [];
     for (
       let wy = Math.ceil(minY / LABEL_STEP) * LABEL_STEP;
       wy <= maxY;
       wy += LABEL_STEP
     ) {
-      const gy = wy - minY;
-      const py = AXIS_TOP + gy * cell + cell / 2;
-      ctx.fillText(String(wy), AXIS_LEFT - 4, py);
+      out.push({ wy, gy: wy - minY });
     }
+    return out;
+  }, [minY, maxY]);
 
-    for (const o of others) {
-      const gx = o.x - center.x + visionRadius;
-      const gy = o.y - center.y + visionRadius;
-      if (gx < 0 || gy < 0 || gx >= gridSize || gy >= gridSize) continue;
-      const cx = AXIS_LEFT + gx * cell + cell / 2;
-      const cy = AXIS_TOP + gy * cell + cell / 2;
-      const hi = selectedEntityId === o.id;
-      ctx.fillStyle = "#f0a0a0";
-      ctx.beginPath();
-      ctx.arc(cx, cy, otherR, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = hi ? "#ff2d9b" : "#111";
-      ctx.lineWidth = hi ? 2.5 : 1;
-      ctx.stroke();
-    }
-
-    {
-      const gx = player.x - center.x + visionRadius;
-      const gy = player.y - center.y + visionRadius;
-      if (gx >= 0 && gy >= 0 && gx < gridSize && gy < gridSize) {
-        const cx = AXIS_LEFT + gx * cell + cell / 2;
-        const cy = AXIS_TOP + gy * cell + cell / 2;
-        drawPlayerAvatar(
-          ctx,
-          cx,
-          cy,
-          avatarR,
-          selectedEntityId === player.id,
-        );
-      }
-    }
-
-    if (selectedTile) {
-      const gx = selectedTile.x - center.x + visionRadius;
-      const gy = selectedTile.y - center.y + visionRadius;
-      if (gx >= 0 && gy >= 0 && gx < gridSize && gy < gridSize) {
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(
-          AXIS_LEFT + gx * cell + 1,
-          AXIS_TOP + gy * cell + 1,
-          cell - 2,
-          cell - 2,
-        );
-      }
-    }
-  }, [
-    tileMap,
-    center,
-    player,
-    others,
-    selectedTile,
-    selectedEntityId,
-    gridSize,
-    cell,
-    canvasW,
-    canvasH,
-    mapW,
-    mapH,
-    visionRadius,
-    avatarR,
-    otherR,
-  ]);
-
-  function hitUnit(mx: number, my: number): SelectedEntity | null {
-    // prefer top-most: check self first then others (self drawn on top)
-    const candidates = [
-      { u: player, r: avatarR },
-      ...others.map((u) => ({ u, r: otherR })),
+  const units = useMemo(() => {
+    return [
+      { u: player, self: true as const },
+      ...others.map((u) => ({ u, self: false as const })),
     ];
-    for (const { u, r } of candidates) {
-      const { cx, cy, inView } = worldCenterCanvas(u.x, u.y);
-      if (!inView) continue;
-      const dx = mx - cx;
-      const dy = my - cy;
-      if (dx * dx + dy * dy <= r * r) {
-        return {
-          type: "player",
-          id: u.id,
-          name: u.name,
-          x: u.x,
-          y: u.y,
+  }, [player, others]);
+
+  useLayoutEffect(() => {
+    const wrap = wrapRef.current;
+    const next: ScreenAnchors = {
+      tile: null,
+      entity: null,
+      cellSize: cell,
+    };
+    if (selectedEntityId != null && wrap) {
+      const el = entityRefs.current.get(selectedEntityId);
+      if (el) {
+        const wr = wrap.getBoundingClientRect();
+        const er = el.getBoundingClientRect();
+        next.entity = {
+          x: er.left + er.width / 2 - wr.left,
+          y: er.top + er.height / 2 - wr.top,
         };
       }
     }
-    return null;
+    onAnchorsChange(next);
+  }, [
+    selectedEntityId,
+    cell,
+    player.x,
+    player.y,
+    others,
+    center.x,
+    center.y,
+    boardW,
+    boardH,
+    viewRadius,
+    onAnchorsChange,
+  ]);
+
+  function setEntityRef(id: number, el: HTMLButtonElement | null) {
+    if (el) entityRefs.current.set(id, el);
+    else entityRefs.current.delete(id);
   }
 
-  function onClick(e: React.MouseEvent<HTMLCanvasElement>) {
-    const canvas = canvasRef.current!;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const mx = (e.clientX - rect.left) * scaleX;
-    const my = (e.clientY - rect.top) * scaleY;
-    if (mx < AXIS_LEFT || my < AXIS_TOP) return;
-
-    const entity = hitUnit(mx, my);
-    if (entity) {
-      onMapClick({ x: entity.x, y: entity.y, entity });
-      return;
-    }
-
-    const gx = Math.floor((mx - AXIS_LEFT) / cell);
-    const gy = Math.floor((my - AXIS_TOP) / cell);
-    if (gx < 0 || gy < 0 || gx >= gridSize || gy >= gridSize) return;
-    onMapClick({
-      x: center.x - visionRadius + gx,
-      y: center.y - visionRadius + gy,
-      entity: null,
+  function onEntityEnter(u: MapPlayer) {
+    setTileTip(null);
+    onEntityHoverChange({
+      type: "player",
+      id: u.id,
+      name: u.name,
+      x: u.x,
+      y: u.y,
     });
   }
+
+  function onEntityLeave() {
+    onEntityHoverChange(null);
+  }
+
+  const showTileTip = tileTip && selectedEntityId == null;
 
   return (
     <div
       ref={wrapRef}
       className="relative flex h-full w-full min-h-0 items-center justify-center overflow-hidden bg-white"
     >
-      <canvas
-        ref={canvasRef}
-        width={canvasW}
-        height={canvasH}
-        onClick={onClick}
-        className="cursor-crosshair"
-        style={{
-          width: canvasW,
-          height: canvasH,
-          imageRendering: "pixelated",
-        }}
-      />
+      <div
+        className="relative shrink-0"
+        style={{ width: boardW, height: boardH }}
+      >
+        <div
+          className="absolute text-center text-[10px] font-bold text-pink-600"
+          style={{ left: AXIS_LEFT, top: 0, width: mapW, height: AXIS_TOP }}
+        >
+          {xLabels.map(({ wx, gx }) => (
+            <span
+              key={wx}
+              className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2"
+              style={{ left: gx * cell + cell / 2 }}
+            >
+              {wx}
+            </span>
+          ))}
+        </div>
+
+        <div
+          className="absolute text-right text-[10px] font-bold text-pink-600"
+          style={{ left: 0, top: AXIS_TOP, width: AXIS_LEFT, height: mapH }}
+        >
+          {yLabels.map(({ wy, gy }) => (
+            <span
+              key={wy}
+              className="absolute right-1 -translate-y-1/2"
+              style={{ top: gy * cell + cell / 2 }}
+            >
+              {wy}
+            </span>
+          ))}
+        </div>
+
+        <div
+          className="absolute bg-[#3d9ec9]"
+          style={{
+            left: AXIS_LEFT,
+            top: AXIS_TOP,
+            width: mapW,
+            height: mapH,
+            display: "grid",
+            gridTemplateColumns: `repeat(${gridSize}, ${cell}px)`,
+            gridTemplateRows: `repeat(${gridSize}, ${cell}px)`,
+          }}
+        >
+          {cells.map((c) => (
+            <div
+              key={c.key}
+              className="relative box-border border border-black/80"
+              style={{ backgroundColor: c.bg, width: cell, height: cell }}
+              onMouseEnter={() =>
+                setTileTip({
+                  label: `(${c.wx}, ${c.wy})`,
+                  gx: c.gx,
+                  gy: c.gy,
+                })
+              }
+              onMouseLeave={() => setTileTip(null)}
+            >
+              {c.dim ? (
+                <div className="pointer-events-none absolute inset-0 bg-black/45" />
+              ) : null}
+            </div>
+          ))}
+        </div>
+
+        {showTileTip ? (
+          <div
+            className="pointer-events-none absolute z-20 whitespace-nowrap rounded bg-stone-900/90 px-1.5 py-0.5 text-[10px] font-medium text-white"
+            style={{
+              left: AXIS_LEFT + tileTip.gx * cell + cell / 2,
+              top: AXIS_TOP + tileTip.gy * cell - 2,
+              transform: "translate(-50%, -100%)",
+            }}
+          >
+            {tileTip.label}
+          </div>
+        ) : null}
+
+        <div
+          className="pointer-events-none absolute z-10"
+          style={{ left: AXIS_LEFT, top: AXIS_TOP, width: mapW, height: mapH }}
+        >
+          {units.map(({ u, self }) => {
+            const gx = u.x - minX;
+            const gy = u.y - minY;
+            if (gx < 0 || gy < 0 || gx >= gridSize || gy >= gridSize) {
+              return null;
+            }
+            const size = self ? avatarSize : otherSize;
+            const highlight = selectedEntityId === u.id;
+            return (
+              <button
+                key={u.id}
+                ref={(el) => setEntityRef(u.id, el)}
+                type="button"
+                onMouseEnter={() => onEntityEnter(u)}
+                onMouseLeave={onEntityLeave}
+                className="pointer-events-auto absolute flex items-center justify-center rounded-full border bg-[#f5d76e]"
+                style={{
+                  left: gx * cell + cell / 2,
+                  top: gy * cell + cell / 2,
+                  width: size,
+                  height: size,
+                  borderColor: highlight ? "#ff2d9b" : "#1a1a1a",
+                  borderWidth: highlight ? 2 : 1,
+                  transform: "translate(-50%, -50%)",
+                  backgroundColor: self ? "#f5d76e" : "#f0a0a0",
+                }}
+                aria-label={u.name}
+              >
+                {self ? (
+                  <svg
+                    width={size * 0.55}
+                    height={size * 0.55}
+                    viewBox="0 0 24 24"
+                    fill="none"
+                  >
+                    <circle cx="9" cy="10" r="1.2" fill="#1a1a1a" />
+                    <circle cx="15" cy="10" r="1.2" fill="#1a1a1a" />
+                    <path
+                      d="M8 14c1.2 1.5 2.8 2.2 4 2.2s2.8-.7 4-2.2"
+                      stroke="#1a1a1a"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                  </svg>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

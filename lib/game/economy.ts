@@ -10,12 +10,13 @@ import {
   TOWN_CONSUME_PER_TILE,
 } from "@/lib/map/constants";
 import { generateTile } from "@/lib/map/generator";
+import { getPlayerWorld } from "@/lib/map/world";
 
 function clusterSize(
   buildingsOfType: Building[],
   start: Building,
 ): number {
-  const key = (b: Building) => `${b.x},${b.y}`;
+  const key = (b: Building) => `${b.mapId},${b.x},${b.y}`;
   const set = new Set(buildingsOfType.map(key));
   const visited = new Set<string>();
   const stack = [start];
@@ -32,7 +33,7 @@ function clusterSize(
       [0, 1],
       [0, -1],
     ] as const) {
-      const nk = `${cur.x + dx},${cur.y + dy}`;
+      const nk = `${cur.mapId},${cur.x + dx},${cur.y + dy}`;
       if (set.has(nk) && !visited.has(nk)) {
         const next = buildingsOfType.find((b) => key(b) === nk);
         if (next) stack.push(next);
@@ -61,8 +62,14 @@ export async function settleEconomy(db: Db, playerId: number): Promise<void> {
   const cycles = Math.floor((now - last) / (ECONOMY_CYCLE_SECONDS * 1000));
   if (cycles <= 0) return;
 
+  const world = await getPlayerWorld(db, playerId);
+  const mapId = world.id;
+
   const owned = await db.query.buildings.findMany({
-    where: eq(buildings.ownerId, playerId),
+    where: and(
+      eq(buildings.ownerId, playerId),
+      eq(buildings.mapId, mapId),
+    ),
   });
 
   let gold = player.gold;
@@ -79,7 +86,7 @@ export async function settleEconomy(db: Db, playerId: number): Promise<void> {
   for (let c = 0; c < cycles; c++) {
     // Mines → gold from resource type
     for (const m of mines) {
-      const tile = generateTile(m.x, m.y);
+      const tile = generateTile(m.x, m.y, world.seed);
       if (tile.resourceType === "none") continue;
       gold += MINE_GOLD_RATES[tile.resourceType];
     }
@@ -172,8 +179,13 @@ export async function getOwnedBuildingAt(
   db: Db,
   x: number,
   y: number,
+  mapId: number,
 ): Promise<Building | undefined> {
   return db.query.buildings.findFirst({
-    where: and(eq(buildings.x, x), eq(buildings.y, y)),
+    where: and(
+      eq(buildings.mapId, mapId),
+      eq(buildings.x, x),
+      eq(buildings.y, y),
+    ),
   });
 }

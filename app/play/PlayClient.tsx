@@ -5,14 +5,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Hud } from "@/components/game/Hud";
 import {
   MapCanvas,
-  type MapClickPayload,
   type ScreenAnchors,
   type SelectedEntity,
   type ViewportTile,
 } from "@/components/game/MapCanvas";
 import { MovePad, type TravelProgress } from "@/components/game/MovePad";
-import { TilePopup } from "@/components/game/TilePopup";
+import { Minimap } from "@/components/game/Minimap";
 import { UserCard } from "@/components/game/UserCard";
+import { ZoomSlider } from "@/components/game/ZoomSlider";
 import { buildDirectionalPath, type Point } from "@/lib/game/path";
 import {
   ingestExploredFromTiles,
@@ -38,7 +38,11 @@ type MeResponse = {
     status: string;
   };
   travel: {
+    pathIndex: number;
+    pathLength: number;
+    path: Point[];
     etaSeconds: number;
+    origin: { x: number; y: number };
     target: { x: number; y: number };
   } | null;
   friends: Array<{ id: number; name: string; x: number; y: number }>;
@@ -57,10 +61,7 @@ type ViewportResponse = {
   players: Array<{ id: number; name: string; x: number; y: number }>;
 };
 
-type Selection = {
-  tile: { x: number; y: number };
-  entity: SelectedEntity | null;
-} | null;
+type Selection = SelectedEntity | null;
 
 function clampPopup(
   left: number,
@@ -88,6 +89,13 @@ async function readJson<T>(res: Response): Promise<T | null> {
   }
 }
 
+function viewRadiusForZoom(level: number, visionR: number) {
+  return Math.max(1, Math.round(visionR * 2 ** -level));
+}
+
+/** Max zoom-out view radius; softRefresh loads explored for this range. */
+const MAX_VIEW_RADIUS = 80;
+
 export default function PlayClient() {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [viewport, setViewport] = useState<ViewportResponse | null>(null);
@@ -106,6 +114,7 @@ export default function PlayClient() {
   const [mapSize, setMapSize] = useState({ w: 800, h: 600 });
   const mapAreaRef = useRef<HTMLDivElement>(null);
   const refreshSeqRef = useRef(0);
+  const exploredSyncSeqRef = useRef(0);
   const bootstrappedRef = useRef(false);
   const travelingRef = useRef(false);
   const travelTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -113,12 +122,73 @@ export default function PlayClient() {
   const travelIndexRef = useRef(0);
   const travelOriginRef = useRef<Point | null>(null);
   const travelTargetRef = useRef<Point | null>(null);
+  const startLocalTravelRef = useRef<
+    (
+      path: Point[],
+      secondsPerTile: number,
+      startIndex?: number,
+      isResume?: boolean,
+    ) => void
+  >(() => {});
   const displayPosRef = useRef<Point | null>(null);
   const playerIdRef = useRef<number | null>(null);
   const exploredRef = useRef<Set<string>>(new Set());
   const overlaysRef = useRef<Map<string, TileOverlay>>(new Map());
   const worldSeedRef = useRef(WORLD_SEED);
   const visionRadiusRef = useRef(VISION_RADIUS);
+  const viewRadiusRef = useRef(VISION_RADIUS);
+  const [mapZoomLevel, setMapZoomLevel] = useState(0);
+  const mapZoomLevelRef = useRef(0);
+  const [exploredRevision, setExploredRevision] = useState(0);
+  const hoverCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  const HOVER_CLOSE_MS = 180;
+
+  const cancelCloseEntity = useCallback(() => {
+    if (hoverCloseTimerRef.current) {
+      clearTimeout(hoverCloseTimerRef.current);
+      hoverCloseTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleCloseEntity = useCallback(() => {
+    cancelCloseEntity();
+    hoverCloseTimerRef.current = setTimeout(() => {
+      hoverCloseTimerRef.current = null;
+      setSelection(null);
+    }, HOVER_CLOSE_MS);
+  }, [cancelCloseEntity]);
+
+  const openEntity = useCallback(
+    (entity: SelectedEntity) => {
+      cancelCloseEntity();
+      setSelection(entity);
+    },
+    [cancelCloseEntity],
+  );
+
+  const closeEntity = useCallback(() => {
+    cancelCloseEntity();
+    setSelection(null);
+  }, [cancelCloseEntity]);
+
+  const onEntityHoverChange = useCallback(
+    (entity: SelectedEntity | null) => {
+      if (entity) openEntity(entity);
+      else scheduleCloseEntity();
+    },
+    [openEntity, scheduleCloseEntity],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (hoverCloseTimerRef.current) {
+        clearTimeout(hoverCloseTimerRef.current);
+      }
+    };
+  }, []);
 
   const rebuildFogAt = useCallback((pos: Point) => {
     markVisionExplored(
@@ -130,11 +200,93 @@ export default function PlayClient() {
     return rebuildLocalViewportTiles({
       center: pos,
       visionRadius: visionRadiusRef.current,
+      viewRadius: viewRadiusRef.current,
       worldSeed: worldSeedRef.current,
       explored: exploredRef.current,
       overlays: overlaysRef.current,
     });
   }, []);
+
+  const syncExploredAt = useCallback(
+    async (pos: Point) => {
+      const seq = ++exploredSyncSeqRef.current;
+      try {
+        const viewR = MAX_VIEW_RADIUS;
+        const [exploredRes, vpRes] = await Promise.all([
+          fetch(
+            `/api/map/explored?x=${pos.x}&y=${pos.y}&r=${MAX_VIEW_RADIUS}`,
+          ),
+          fetch(
+            `/api/map/viewport?x=${pos.x}&y=${pos.y}&viewR=${viewR}`,
+          ),
+        ]);
+
+        // Always merge explored (additive) even if a newer step started
+        if (exploredRes.ok) {
+          const data = await readJson<{ cells?: string[] }>(exploredRes);
+          if (data?.cells) {
+            for (const cell of data.cells) {
+              exploredRef.current.add(cell);
+            }
+            setExploredRevision((n) => n + 1);
+          }
+        }
+
+        let players = undefined as
+          | Array<{ id: number; name: string; x: number; y: number }>
+          | undefined;
+        if (vpRes.ok) {
+          const vpData = await readJson<ViewportResponse>(vpRes);
+          if (vpData?.tiles) {
+            ingestExploredFromTiles(exploredRef.current, vpData.tiles);
+            for (const [k, v] of overlaysFromTiles(vpData.tiles)) {
+              overlaysRef.current.set(k, v);
+            }
+            players = vpData.players;
+            setExploredRevision((n) => n + 1);
+          }
+        }
+
+        if (seq !== exploredSyncSeqRef.current) return;
+
+        const live = displayPosRef.current ?? pos;
+        const tiles = rebuildFogAt(live);
+        setViewport((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            center: { x: live.x, y: live.y },
+            player: { ...prev.player, x: live.x, y: live.y },
+            tiles,
+            players: players ?? prev.players,
+          };
+        });
+      } catch {
+        // map sync — ignore network blips
+      }
+    },
+    [rebuildFogAt],
+  );
+
+  const onZoomLevelChange = useCallback(
+    (level: number) => {
+      const clamped = Math.max(-2, Math.min(2, level));
+      mapZoomLevelRef.current = clamped;
+      setMapZoomLevel(clamped);
+      viewRadiusRef.current = viewRadiusForZoom(
+        clamped,
+        visionRadiusRef.current,
+      );
+      const pos = displayPosRef.current;
+      if (!pos) return;
+      const tiles = rebuildFogAt(pos);
+      setViewport((prev) => {
+        if (!prev) return prev;
+        return { ...prev, tiles };
+      });
+    },
+    [rebuildFogAt],
+  );
 
   const clearTravelUi = useCallback(() => {
     travelPathRef.current = [];
@@ -176,15 +328,14 @@ export default function PlayClient() {
         };
       });
       setSelection((prev) => {
-        if (!prev?.entity || prev.entity.type !== "player") return prev;
-        if (prev.entity.id !== playerIdRef.current) return prev;
-        return {
-          tile: { x: pos.x, y: pos.y },
-          entity: { ...prev.entity, x: pos.x, y: pos.y },
-        };
+        if (!prev || prev.type !== "player") return prev;
+        if (prev.id !== playerIdRef.current) return prev;
+        return { ...prev, x: pos.x, y: pos.y };
       });
+      setExploredRevision((n) => n + 1);
+      void syncExploredAt(pos);
     },
-    [rebuildFogAt],
+    [rebuildFogAt, syncExploredAt],
   );
 
   const updateTravelProgress = useCallback((index: number, pathLen: number) => {
@@ -278,9 +429,14 @@ export default function PlayClient() {
       worldSeedRef.current = meData.config.worldSeed ?? worldSeedRef.current;
       visionRadiusRef.current =
         meData.config.visionRadius ?? visionRadiusRef.current;
+      viewRadiusRef.current = viewRadiusForZoom(
+        mapZoomLevelRef.current,
+        visionRadiusRef.current,
+      );
 
+      const isFirstBootstrap = !bootstrappedRef.current;
       // Bootstrap once from server; after that self pose is local-only
-      if (!bootstrappedRef.current) {
+      if (isFirstBootstrap) {
         bootstrappedRef.current = true;
         displayPosRef.current = {
           x: meData.player.x,
@@ -289,6 +445,12 @@ export default function PlayClient() {
       }
 
       const display = displayPosRef.current!;
+      const resumeTravel =
+        isFirstBootstrap &&
+        !travelingRef.current &&
+        !!meData.travel?.path &&
+        meData.travel.path.length - 1 > meData.travel.pathIndex;
+
       setError("");
       setMe((prev) => ({
         ...meData,
@@ -296,28 +458,45 @@ export default function PlayClient() {
           ...meData.player,
           x: display.x,
           y: display.y,
-          status: travelingRef.current
+          status: travelingRef.current || resumeTravel
             ? "traveling"
-            : (prev?.player.status ?? "idle"),
+            : (prev?.player.status ?? meData.player.status ?? "idle"),
         },
-        travel: null,
+        // Keep travel payload only until local timer owns the trip
+        travel: travelingRef.current || resumeTravel ? meData.travel : null,
         config: meData.config,
       }));
 
-      const vpRes = await fetch(
-        `/api/map/viewport?x=${display.x}&y=${display.y}`,
-      );
+      const [vpRes, exploredRes] = await Promise.all([
+        fetch(
+          `/api/map/viewport?x=${display.x}&y=${display.y}&viewR=${MAX_VIEW_RADIUS}`,
+        ),
+        fetch(
+          `/api/map/explored?x=${display.x}&y=${display.y}&r=${MAX_VIEW_RADIUS}`,
+        ),
+      ]);
       if (seq !== refreshSeqRef.current) return;
       if (!vpRes.ok) return;
       const vpData = await readJson<ViewportResponse>(vpRes);
       if (!vpData?.player) return;
       if (seq !== refreshSeqRef.current) return;
 
+      const exploredData = exploredRes.ok
+        ? await readJson<{ cells?: string[] }>(exploredRes)
+        : null;
+      if (seq !== refreshSeqRef.current) return;
+      if (exploredData?.cells) {
+        for (const cell of exploredData.cells) {
+          exploredRef.current.add(cell);
+        }
+      }
+
       // Others + overlays + explored only; fog/self pose from local display
       ingestExploredFromTiles(exploredRef.current, vpData.tiles);
       for (const [k, v] of overlaysFromTiles(vpData.tiles)) {
         overlaysRef.current.set(k, v);
       }
+      setExploredRevision((n) => n + 1);
       // Re-read display in case we moved during fetch
       const live = displayPosRef.current ?? display;
       const tiles = rebuildFogAt(live);
@@ -337,30 +516,38 @@ export default function PlayClient() {
 
       if (!travelingRef.current) {
         setSelection((prev) => {
-          if (!prev?.entity || prev.entity.type !== "player") return prev;
-          if (prev.entity.id === meData.player.id) {
+          if (!prev || prev.type !== "player") return prev;
+          if (prev.id === meData.player.id) {
             return {
-              tile: { x: live.x, y: live.y },
-              entity: {
-                ...prev.entity,
-                x: live.x,
-                y: live.y,
-                name: meData.player.name,
-              },
+              ...prev,
+              x: live.x,
+              y: live.y,
+              name: meData.player.name,
             };
           }
-          const other = vpData.players.find((p) => p.id === prev.entity!.id);
+          const other = vpData.players.find((p) => p.id === prev.id);
           if (!other) return prev;
           return {
-            tile: { x: other.x, y: other.y },
-            entity: {
-              ...prev.entity,
-              x: other.x,
-              y: other.y,
-              name: other.name,
-            },
+            ...prev,
+            x: other.x,
+            y: other.y,
+            name: other.name,
           };
         });
+      }
+
+      if (resumeTravel && meData.travel?.path) {
+        const path = meData.travel.path;
+        const idx = Math.max(
+          0,
+          Math.min(meData.travel.pathIndex, path.length - 1),
+        );
+        startLocalTravelRef.current(
+          path,
+          meData.config.travelSecondsPerTile,
+          idx,
+          true,
+        );
       }
     } catch {
       // soft sync — ignore network blips
@@ -373,56 +560,52 @@ export default function PlayClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function handleMapClick(payload: MapClickPayload) {
-    setSelection((prev) => {
-      if (payload.entity) {
-        if (
-          prev?.entity?.type === "player" &&
-          prev.entity.id === payload.entity.id
-        ) {
-          return null;
-        }
-        return {
-          tile: { x: payload.entity.x, y: payload.entity.y },
-          entity: payload.entity,
-        };
-      }
-      if (
-        prev &&
-        !prev.entity &&
-        prev.tile.x === payload.x &&
-        prev.tile.y === payload.y
-      ) {
-        return null;
-      }
-      return { tile: { x: payload.x, y: payload.y }, entity: null };
-    });
-  }
-
   function finishLocalTravel(end: Point) {
     stopLocalTravelTimer();
     clearTravelUi();
     applyLocalPos(end, "idle");
-    void softRefresh();
+    void (async () => {
+      try {
+        await fetch("/api/travel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "stop", x: end.x, y: end.y }),
+        });
+      } catch {
+        // ignore — settle on softRefresh will catch up
+      }
+      void softRefresh();
+    })();
   }
 
-  function startLocalTravel(path: Point[], secondsPerTile: number) {
+  function startLocalTravel(
+    path: Point[],
+    secondsPerTile: number,
+    startIndex = 0,
+    isResume = false,
+  ) {
     stopLocalTravelTimer();
     if (path.length < 2) return;
 
+    const index = Math.max(0, Math.min(startIndex, path.length - 1));
+    if (index >= path.length - 1) return;
+
     // Invalidate in-flight softRefresh so it cannot overwrite mid-travel
-    refreshSeqRef.current += 1;
+    // (skip on resume — we are continuing the bootstrap softRefresh)
+    if (!isResume) {
+      refreshSeqRef.current += 1;
+    }
 
     const origin = path[0]!;
     const target = path[path.length - 1]!;
     travelPathRef.current = path;
-    travelIndexRef.current = 0;
+    travelIndexRef.current = index;
     travelOriginRef.current = origin;
     travelTargetRef.current = target;
     travelingRef.current = true;
     setTraveling(true);
-    updateTravelProgress(0, path.length);
-    applyLocalPos(origin, "traveling");
+    updateTravelProgress(index, path.length);
+    applyLocalPos(path[index]!, "traveling");
 
     const ms = Math.max(50, secondsPerTile * 1000);
     travelTimerRef.current = setInterval(() => {
@@ -442,6 +625,8 @@ export default function PlayClient() {
       applyLocalPos(pos, "traveling");
     }, ms);
   }
+
+  startLocalTravelRef.current = startLocalTravel;
 
   function onStopTravel() {
     if (!travelingRef.current) return;
@@ -529,13 +714,10 @@ export default function PlayClient() {
     })();
   }
 
-  async function onBuild(action: "waypoint" | "claim") {
-    if (!me || !selection || travelingRef.current) return;
-    const { x, y } = selection.tile;
-    if (me.player.x !== x || me.player.y !== y) {
-      setError("须站在该格上才能操作");
-      return;
-    }
+  async function onWaypoint() {
+    if (!me || travelingRef.current) return;
+    const x = me.player.x;
+    const y = me.player.y;
     setBusy(true);
     setError("");
     try {
@@ -543,10 +725,10 @@ export default function PlayClient() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          action,
+          action: "waypoint",
           x,
           y,
-          message: action === "waypoint" ? "路标" : undefined,
+          message: "路标",
         }),
       });
       const data = await readJson<{ error?: string }>(res);
@@ -570,33 +752,13 @@ export default function PlayClient() {
     );
   }
 
-  const TILE_W = 224;
-  const TILE_H = 128;
   const ENTITY_W = 176;
-  const ENTITY_H = 112;
+  const ENTITY_H = 140;
   const GAP = 10;
   const halfCell = Math.max(8, anchors.cellSize / 2);
 
-  const canActHere =
-    !!selection &&
-    !traveling &&
-    me.player.x === selection.tile.x &&
-    me.player.y === selection.tile.y;
-
-  const tilePopupPos = (() => {
-    if (!anchors.tile) return null;
-    if (!Number.isFinite(anchors.tile.x) || !Number.isFinite(anchors.tile.y)) {
-      return null;
-    }
-    const rawLeft = anchors.tile.x + halfCell + GAP;
-    const above = anchors.tile.y - halfCell - TILE_H - GAP;
-    const rawTop =
-      above < 8 ? anchors.tile.y + halfCell + GAP : above;
-    return clampPopup(rawLeft, rawTop, TILE_W, TILE_H, mapSize.w, mapSize.h);
-  })();
-
   const entityPopupPos = (() => {
-    if (!anchors.entity || !selection?.entity) return null;
+    if (!anchors.entity || !selection) return null;
     if (
       !Number.isFinite(anchors.entity.x) ||
       !Number.isFinite(anchors.entity.y)
@@ -628,50 +790,61 @@ export default function PlayClient() {
           player={mapPlayer!}
           others={viewport.players}
           visionRadius={viewport.visionRadius}
-          selectedTile={selection?.tile ?? null}
-          selectedEntityId={selection?.entity?.id ?? null}
-          onMapClick={handleMapClick}
+          viewRadius={viewRadiusForZoom(mapZoomLevel, viewport.visionRadius)}
+          selectedEntityId={selection?.id ?? null}
+          onEntityHoverChange={onEntityHoverChange}
           onAnchorsChange={onAnchorsChange}
         />
 
         <div className="pointer-events-none absolute inset-0 z-10">
-          {selection && tilePopupPos ? (
+          <div className="absolute left-4 top-4 z-20">
+            <Minimap
+              exploredRef={exploredRef}
+              exploredRevision={exploredRevision}
+              seed={me.config.worldSeed ?? WORLD_SEED}
+              player={{ x: me.player.x, y: me.player.y }}
+              viewCenter={viewport.center}
+              viewRadius={viewRadiusForZoom(
+                mapZoomLevel,
+                viewport.visionRadius,
+              )}
+            />
+          </div>
+
+          {selection && entityPopupPos ? (
             <div
-              className="absolute left-0 top-0"
+              className="pointer-events-auto absolute left-0 top-0"
               style={{
-                transform: `translate(${tilePopupPos.left}px, ${tilePopupPos.top}px)`,
+                transform: `translate(${entityPopupPos.left}px, ${entityPopupPos.top}px)`,
               }}
+              onMouseEnter={cancelCloseEntity}
+              onMouseLeave={scheduleCloseEntity}
             >
-              <TilePopup
-                x={selection.tile.x}
-                y={selection.tile.y}
-                canActHere={canActHere}
+              <UserCard
+                name={selection.name}
+                isSelf={selection.id === me.player.id}
+                gold={me.player.gold}
+                xp={me.player.xp ?? 0}
+                x={selection.x}
+                y={selection.y}
                 busy={busy || traveling}
-                onClose={() => setSelection(null)}
-                onWaypoint={() => void onBuild("waypoint")}
-                onClaim={() => void onBuild("claim")}
+                onClose={closeEntity}
+                onWaypoint={
+                  selection.id === me.player.id
+                    ? () => void onWaypoint()
+                    : undefined
+                }
               />
             </div>
           ) : null}
 
-          {selection?.entity && entityPopupPos ? (
-            <div
-              className="absolute left-0 top-0"
-              style={{
-                transform: `translate(${entityPopupPos.left}px, ${entityPopupPos.top}px)`,
-              }}
-            >
-              <UserCard
-                name={selection.entity.name}
-                isSelf={selection.entity.id === me.player.id}
-                gold={me.player.gold}
-                xp={me.player.xp ?? 0}
-                x={selection.entity.x}
-                y={selection.entity.y}
-                onClose={() => setSelection(null)}
-              />
-            </div>
-          ) : null}
+          <div className="absolute bottom-4 left-4 z-20">
+            <ZoomSlider
+              zoomLevel={mapZoomLevel}
+              visionRadius={viewport.visionRadius}
+              onZoomLevelChange={onZoomLevelChange}
+            />
+          </div>
 
           <div className="absolute bottom-4 right-4">
             <MovePad

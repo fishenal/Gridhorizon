@@ -68,28 +68,31 @@ export function overlaysFromTiles(
 /**
  * Rebuild the square viewport around center with client-authoritative fog.
  * Terrain from seed; buildings/claims from optional overlay map (last server sync).
+ * `viewRadius` sizes the square; `visionRadius` sizes the inVision circle.
  */
 export function rebuildLocalViewportTiles(opts: {
   center: Point;
   visionRadius?: number;
+  viewRadius?: number;
   worldSeed: number;
   explored: Set<string>;
   overlays?: Map<string, TileOverlay>;
 }): ViewportTile[] {
-  const r = opts.visionRadius ?? VISION_RADIUS;
+  const visionR = opts.visionRadius ?? VISION_RADIUS;
+  const viewR = opts.viewRadius ?? visionR;
   const { x: cx, y: cy } = opts.center;
-  const r2 = r * r;
+  const visionR2 = visionR * visionR;
   const tiles: ViewportTile[] = [];
 
-  for (let y = cy - r; y <= cy + r; y++) {
-    for (let x = cx - r; x <= cx + r; x++) {
+  for (let y = cy - viewR; y <= cy + viewR; y++) {
+    for (let x = cx - viewR; x <= cx + viewR; x++) {
       if (x < 0 || y < 0 || x >= MAP_SIZE || y >= MAP_SIZE) {
         tiles.push({ x, y, fog: true });
         continue;
       }
       const dx = x - cx;
       const dy = y - cy;
-      const inVision = dx * dx + dy * dy <= r2;
+      const inVision = dx * dx + dy * dy <= visionR2;
       const wasExplored = opts.explored.has(key(x, y));
       if (!inVision && !wasExplored) {
         tiles.push({ x, y, fog: true });

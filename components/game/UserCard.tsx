@@ -4,13 +4,25 @@ type Props = {
   name: string;
   gold?: number;
   xp?: number;
-  x?: number;
-  y?: number;
+  x: number;
+  y: number;
   isSelf: boolean;
+  busy?: boolean;
   onClose: () => void;
+  onWaypoint?: () => void;
 };
 
-export function UserCard({ name, gold, xp, x, y, isSelf, onClose }: Props) {
+export function UserCard({
+  name,
+  gold,
+  xp,
+  x,
+  y,
+  isSelf,
+  busy,
+  onClose,
+  onWaypoint,
+}: Props) {
   return (
     <div className="pointer-events-auto w-44 rounded-xl border border-stone-200 bg-white/95 p-3 shadow-lg backdrop-blur">
       <div className="mb-2 flex items-start justify-between gap-1">
@@ -30,9 +42,7 @@ export function UserCard({ name, gold, xp, x, y, isSelf, onClose }: Props) {
               />
             </svg>
           </div>
-          <p className="truncate text-sm font-medium text-pink-600">
-            {name} - 头像
-          </p>
+          <p className="truncate text-sm font-medium text-pink-600">{name}</p>
         </div>
         <button
           type="button"
@@ -42,16 +52,25 @@ export function UserCard({ name, gold, xp, x, y, isSelf, onClose }: Props) {
           关闭
         </button>
       </div>
+      <p className="text-sm text-pink-600">
+        坐标：({x}, {y})
+      </p>
       {isSelf ? (
         <>
           <p className="text-sm text-pink-600">金钱：{gold ?? 0}</p>
-          <p className="text-sm text-pink-600">经验：{xp ?? 0}</p>
+          <p className="mb-2 text-sm text-pink-600">经验：{xp ?? 0}</p>
+          {onWaypoint ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onWaypoint}
+              className="w-full rounded-lg border border-pink-300 bg-white px-2 py-1.5 text-sm text-pink-700 hover:bg-pink-100 disabled:opacity-40"
+            >
+              设立路标
+            </button>
+          ) : null}
         </>
-      ) : (
-        <p className="text-sm text-pink-600">
-          坐标：{x}, {y}
-        </p>
-      )}
+      ) : null}
     </div>
   );
 }

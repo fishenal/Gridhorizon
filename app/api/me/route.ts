@@ -4,8 +4,9 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { players, travelJobs } from "@/lib/db/schema";
 import { settlePlayer } from "@/lib/game/settle";
-import { TRAVEL_SECONDS_PER_TILE, VISION_RADIUS, WORLD_SEED } from "@/lib/map/constants";
+import { TRAVEL_SECONDS_PER_TILE, VISION_RADIUS } from "@/lib/map/constants";
 import { listFriends } from "@/lib/game/social";
+import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
 
 export async function GET() {
   try {
@@ -15,6 +16,7 @@ export async function GET() {
     }
     const playerId = Number(session.user.id);
     const db = getDb();
+    await ensureDefaultMap(db);
     await settlePlayer(db, playerId);
 
     const player = await db.query.players.findFirst({
@@ -24,6 +26,8 @@ export async function GET() {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
+    const world = await getPlayerWorld(db, playerId);
+
     const job = await db.query.travelJobs.findFirst({
       where: eq(travelJobs.playerId, playerId),
     });
@@ -31,19 +35,25 @@ export async function GET() {
     let travel: null | {
       pathIndex: number;
       pathLength: number;
+      path: Array<{ x: number; y: number }>;
       etaSeconds: number;
+      origin: { x: number; y: number };
       target: { x: number; y: number };
     } = null;
 
     if (job) {
       const path = JSON.parse(job.pathJson) as Array<{ x: number; y: number }>;
-      const remaining = Math.max(0, path.length - 1 - job.pathIndex);
-      travel = {
-        pathIndex: job.pathIndex,
-        pathLength: path.length,
-        etaSeconds: remaining * TRAVEL_SECONDS_PER_TILE,
-        target: path[path.length - 1]!,
-      };
+      if (path.length >= 2 && job.pathIndex < path.length - 1) {
+        const remaining = Math.max(0, path.length - 1 - job.pathIndex);
+        travel = {
+          pathIndex: job.pathIndex,
+          pathLength: path.length,
+          path,
+          etaSeconds: remaining * TRAVEL_SECONDS_PER_TILE,
+          origin: path[0]!,
+          target: path[path.length - 1]!,
+        };
+      }
     }
 
     const friends = await listFriends(db, playerId);
@@ -61,12 +71,20 @@ export async function GET() {
         ore: player.ore,
         food: player.food,
         status: player.status,
+        currentMapId: world.id,
       },
       travel,
       friends,
+      map: {
+        id: world.id,
+        slug: world.slug,
+        name: world.name,
+        seed: world.seed,
+        size: world.size,
+      },
       config: {
         travelSecondsPerTile: TRAVEL_SECONDS_PER_TILE,
-        worldSeed: WORLD_SEED,
+        worldSeed: world.seed,
         visionRadius: VISION_RADIUS,
       },
     });
