@@ -47,7 +47,7 @@ export default function RegisterPage() {
         <p className="text-sm tracking-wide text-teal-700">Gridhorizon</p>
         <h1 className="mt-1 text-3xl font-semibold text-stone-900">注册</h1>
         <p className="mt-2 text-stone-600">
-          出生在地图中心 (2500, 2500)，初始 200 金币。
+          出生在地图中心 (4000, 4000)，初始 200 金币。
         </p>
       </div>
       <form onSubmit={onSubmit} className="flex flex-col gap-4">

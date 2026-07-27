@@ -1,8 +1,9 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import type { Db } from "@/lib/db";
 import { exploredChunks } from "@/lib/db/schema";
 import { CHUNK_SIZE } from "./constants";
 import { chunkCoords } from "./generator";
+import { DEFAULT_MAP_ID } from "./world";
 
 const BITS = CHUNK_SIZE * CHUNK_SIZE; // 1024
 const BYTES = BITS / 8; // 128
@@ -38,7 +39,7 @@ export function setBit(bits: Uint8Array, lx: number, ly: number): void {
 
 export function mergeBits(a: Uint8Array, b: Uint8Array): Uint8Array {
   const out = emptyBitmap();
-  for (let i = 0; i < BYTES; i++) out[i] = (a[i]! | b[i]!);
+  for (let i = 0; i < BYTES; i++) out[i] = a[i]! | b[i]!;
   return out;
 }
 
@@ -47,11 +48,13 @@ export async function isExplored(
   playerId: number,
   x: number,
   y: number,
+  mapId: number = DEFAULT_MAP_ID,
 ): Promise<boolean> {
   const { cx, cy, lx, ly } = chunkCoords(x, y);
   const row = await db.query.exploredChunks.findFirst({
     where: and(
       eq(exploredChunks.playerId, playerId),
+      eq(exploredChunks.mapId, mapId),
       eq(exploredChunks.chunkX, cx),
       eq(exploredChunks.chunkY, cy),
     ),
@@ -64,10 +67,14 @@ export async function markExploredCells(
   db: Db,
   playerId: number,
   cells: Array<{ x: number; y: number }>,
+  mapId: number = DEFAULT_MAP_ID,
 ): Promise<void> {
   if (cells.length === 0) return;
 
-  const byChunk = new Map<string, { cx: number; cy: number; locals: Array<{ lx: number; ly: number }> }>();
+  const byChunk = new Map<
+    string,
+    { cx: number; cy: number; locals: Array<{ lx: number; ly: number }> }
+  >();
   for (const { x, y } of cells) {
     const { cx, cy, lx, ly } = chunkCoords(x, y);
     const key = `${cx},${cy}`;
@@ -79,46 +86,84 @@ export async function markExploredCells(
     entry.locals.push({ lx, ly });
   }
 
-  for (const { cx, cy, locals } of byChunk.values()) {
-    const existing = await db.query.exploredChunks.findFirst({
-      where: and(
-        eq(exploredChunks.playerId, playerId),
-        eq(exploredChunks.chunkX, cx),
-        eq(exploredChunks.chunkY, cy),
-      ),
-    });
-    const bits = existing ? decodeBitmap(existing.bitmap) : emptyBitmap();
-    for (const { lx, ly } of locals) setBit(bits, lx, ly);
-    const bitmap = encodeBitmap(bits);
-    if (existing) {
-      await db
-        .update(exploredChunks)
-        .set({ bitmap })
-        .where(eq(exploredChunks.id, existing.id));
-    } else {
-      await db.insert(exploredChunks).values({
-        playerId,
-        chunkX: cx,
-        chunkY: cy,
-        bitmap,
-      });
-    }
-  }
+  const chunkEntries = [...byChunk.values()];
+  const existingRows =
+    chunkEntries.length === 1
+      ? await db
+          .select()
+          .from(exploredChunks)
+          .where(
+            and(
+              eq(exploredChunks.playerId, playerId),
+              eq(exploredChunks.mapId, mapId),
+              eq(exploredChunks.chunkX, chunkEntries[0]!.cx),
+              eq(exploredChunks.chunkY, chunkEntries[0]!.cy),
+            ),
+          )
+      : await db
+          .select()
+          .from(exploredChunks)
+          .where(
+            and(
+              eq(exploredChunks.playerId, playerId),
+              eq(exploredChunks.mapId, mapId),
+              or(
+                ...chunkEntries.map(({ cx, cy }) =>
+                  and(
+                    eq(exploredChunks.chunkX, cx),
+                    eq(exploredChunks.chunkY, cy),
+                  ),
+                ),
+              ),
+            ),
+          );
+
+  const existingByKey = new Map(
+    existingRows.map((row) => [`${row.chunkX},${row.chunkY}`, row]),
+  );
+
+  const conflictTarget = [
+    exploredChunks.playerId,
+    exploredChunks.mapId,
+    exploredChunks.chunkX,
+    exploredChunks.chunkY,
+  ] as const;
+
+  await Promise.all(
+    chunkEntries.map(({ cx, cy, locals }) => {
+      const existing = existingByKey.get(`${cx},${cy}`);
+      const bits = existing ? decodeBitmap(existing.bitmap) : emptyBitmap();
+      for (const { lx, ly } of locals) setBit(bits, lx, ly);
+      const bitmap = encodeBitmap(bits);
+      return db
+        .insert(exploredChunks)
+        .values({ playerId, mapId, chunkX: cx, chunkY: cy, bitmap })
+        .onConflictDoUpdate({
+          target: [...conflictTarget],
+          set: { bitmap },
+        });
+    }),
+  );
 }
 
-/** Copy all explored chunks from source into target (union). */
+/** Copy all explored chunks from source into target (union) on one map. */
 export async function shareExploration(
   db: Db,
   fromPlayerId: number,
   toPlayerId: number,
+  mapId: number = DEFAULT_MAP_ID,
 ): Promise<void> {
   const rows = await db.query.exploredChunks.findMany({
-    where: eq(exploredChunks.playerId, fromPlayerId),
+    where: and(
+      eq(exploredChunks.playerId, fromPlayerId),
+      eq(exploredChunks.mapId, mapId),
+    ),
   });
   for (const row of rows) {
     const existing = await db.query.exploredChunks.findFirst({
       where: and(
         eq(exploredChunks.playerId, toPlayerId),
+        eq(exploredChunks.mapId, mapId),
         eq(exploredChunks.chunkX, row.chunkX),
         eq(exploredChunks.chunkY, row.chunkY),
       ),
@@ -135,6 +180,7 @@ export async function shareExploration(
     } else {
       await db.insert(exploredChunks).values({
         playerId: toPlayerId,
+        mapId,
         chunkX: row.chunkX,
         chunkY: row.chunkY,
         bitmap,
@@ -150,6 +196,7 @@ export async function loadExploredSet(
   minY: number,
   maxX: number,
   maxY: number,
+  mapId: number = DEFAULT_MAP_ID,
 ): Promise<Set<string>> {
   const minCx = Math.floor(minX / CHUNK_SIZE);
   const maxCx = Math.floor(maxX / CHUNK_SIZE);
@@ -157,7 +204,10 @@ export async function loadExploredSet(
   const maxCy = Math.floor(maxY / CHUNK_SIZE);
 
   const rows = await db.query.exploredChunks.findMany({
-    where: eq(exploredChunks.playerId, playerId),
+    where: and(
+      eq(exploredChunks.playerId, playerId),
+      eq(exploredChunks.mapId, mapId),
+    ),
   });
 
   const set = new Set<string>();

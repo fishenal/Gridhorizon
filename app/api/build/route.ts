@@ -5,11 +5,9 @@ import { auth } from "@/lib/auth";
 import { getDb } from "@/lib/db";
 import { buildings, players, tileClaims } from "@/lib/db/schema";
 import { settlePlayer } from "@/lib/game/settle";
-import {
-  MINE_COST,
-  WAYPOINT_COST,
-} from "@/lib/map/constants";
+import { MINE_COST, WAYPOINT_COST } from "@/lib/map/constants";
 import { generateTile } from "@/lib/map/generator";
+import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
 
 const bodySchema = z.object({
   action: z.enum([
@@ -38,6 +36,7 @@ export async function POST(req: Request) {
 
   const { action, x, y, message } = parsed.data;
   const db = getDb();
+  await ensureDefaultMap(db);
   await settlePlayer(db, playerId);
 
   const player = await db.query.players.findFirst({
@@ -47,7 +46,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  // Must be on the tile to build/claim (concept: arrive first)
+  const world = await getPlayerWorld(db, playerId);
+  const mapId = world.id;
+
   if (player.x !== x || player.y !== y) {
     return NextResponse.json(
       { error: "Must be standing on the tile" },
@@ -55,22 +56,33 @@ export async function POST(req: Request) {
     );
   }
 
-  const tile = generateTile(x, y);
+  const tile = generateTile(x, y, world.seed);
   const existingBuilding = await db.query.buildings.findFirst({
-    where: and(eq(buildings.x, x), eq(buildings.y, y)),
+    where: and(
+      eq(buildings.mapId, mapId),
+      eq(buildings.x, x),
+      eq(buildings.y, y),
+    ),
   });
   const existingClaim = await db.query.tileClaims.findFirst({
-    where: and(eq(tileClaims.x, x), eq(tileClaims.y, y)),
+    where: and(
+      eq(tileClaims.mapId, mapId),
+      eq(tileClaims.x, x),
+      eq(tileClaims.y, y),
+    ),
   });
 
   if (action === "claim") {
     if (!tile.isLand) {
-      return NextResponse.json({ error: "Ocean cannot be claimed" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Ocean cannot be claimed" },
+        { status: 400 },
+      );
     }
     if (existingClaim) {
       return NextResponse.json({ error: "Already claimed" }, { status: 400 });
     }
-    await db.insert(tileClaims).values({ x, y, ownerId: playerId });
+    await db.insert(tileClaims).values({ mapId, x, y, ownerId: playerId });
     return NextResponse.json({ ok: true });
   }
 
@@ -86,6 +98,7 @@ export async function POST(req: Request) {
       .set({ gold: player.gold - WAYPOINT_COST })
       .where(eq(players.id, playerId));
     await db.insert(buildings).values({
+      mapId,
       x,
       y,
       ownerId: playerId,
@@ -95,7 +108,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true });
   }
 
-  // Land buildings require claim ownership
   if (!tile.isLand) {
     return NextResponse.json({ error: "Need land" }, { status: 400 });
   }
@@ -121,6 +133,7 @@ export async function POST(req: Request) {
       .set({ gold: player.gold - MINE_COST })
       .where(eq(players.id, playerId));
     await db.insert(buildings).values({
+      mapId,
       x,
       y,
       ownerId: playerId,
@@ -140,6 +153,7 @@ export async function POST(req: Request) {
       );
     }
     await db.insert(buildings).values({
+      mapId,
       x,
       y,
       ownerId: playerId,
@@ -156,6 +170,7 @@ export async function POST(req: Request) {
       );
     }
     await db.insert(buildings).values({
+      mapId,
       x,
       y,
       ownerId: playerId,
@@ -172,6 +187,7 @@ export async function POST(req: Request) {
       );
     }
     await db.insert(buildings).values({
+      mapId,
       x,
       y,
       ownerId: playerId,

@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "@/lib/db";
 import {
   buildings,
@@ -8,36 +8,22 @@ import {
 } from "@/lib/db/schema";
 import {
   MAP_SIZE,
+  MAX_TRAVEL_STEPS,
   TRAVEL_SECONDS_PER_TILE,
   VISION_RADIUS,
   WAYPOINT_TOLL,
 } from "@/lib/map/constants";
 import { markExploredCells, shareExploration } from "@/lib/map/explore";
+import {
+  buildDirectionalPath,
+  buildPath,
+  clampToMap,
+  type Point,
+} from "@/lib/game/path";
+import { DEFAULT_MAP_ID } from "@/lib/map/world";
 
-export type Point = { x: number; y: number };
-
-export function clampToMap(x: number, y: number): Point {
-  return {
-    x: Math.max(0, Math.min(MAP_SIZE - 1, Math.round(x))),
-    y: Math.max(0, Math.min(MAP_SIZE - 1, Math.round(y))),
-  };
-}
-
-/** 4-directional path (Manhattan). */
-export function buildPath(from: Point, to: Point): Point[] {
-  const path: Point[] = [{ x: from.x, y: from.y }];
-  let x = from.x;
-  let y = from.y;
-  while (x !== to.x) {
-    x += x < to.x ? 1 : -1;
-    path.push({ x, y });
-  }
-  while (y !== to.y) {
-    y += y < to.y ? 1 : -1;
-    path.push({ x, y });
-  }
-  return path;
-}
+export type { Point } from "@/lib/game/path";
+export { buildDirectionalPath, buildPath, clampToMap } from "@/lib/game/path";
 
 function cellsInVision(cx: number, cy: number): Point[] {
   const cells: Point[] = [];
@@ -54,55 +40,146 @@ function cellsInVision(cx: number, cy: number): Point[] {
   return cells;
 }
 
-async function handleWaypointAt(
+/**
+ * Sample vision disks along the path segment so fog covers the corridor
+ * without expanding a full disk on every tile (O(steps) → O(steps/r)).
+ */
+function collectExploredAlongPath(
+  path: Point[],
+  fromIndex: number,
+  toIndex: number,
+): Point[] {
+  if (toIndex <= fromIndex) return [];
+  const sampleEvery = Math.max(1, VISION_RADIUS);
+  const seen = new Set<string>();
+  const cells: Point[] = [];
+
+  const addVision = (cx: number, cy: number) => {
+    for (const cell of cellsInVision(cx, cy)) {
+      const key = `${cell.x},${cell.y}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      cells.push(cell);
+    }
+  };
+
+  for (let i = fromIndex + 1; i <= toIndex; i++) {
+    if (i === toIndex || (i - fromIndex) % sampleEvery === 0) {
+      const cell = path[i]!;
+      addVision(cell.x, cell.y);
+    }
+  }
+  return cells;
+}
+
+/** Batch waypoint tolls for cells entered this settle (one bbox query). */
+async function settleWaypointsOnSegment(
   db: Db,
   playerId: number,
-  x: number,
-  y: number,
+  mapId: number,
+  segment: Point[],
 ): Promise<void> {
-  const wp = await db.query.buildings.findFirst({
-    where: and(
-      eq(buildings.x, x),
-      eq(buildings.y, y),
-      eq(buildings.type, "waypoint"),
-    ),
-  });
-  if (!wp || wp.ownerId === playerId) return;
+  if (segment.length === 0) return;
 
-  const already = await db.query.waypointPasses.findFirst({
-    where: and(
-      eq(waypointPasses.playerId, playerId),
-      eq(waypointPasses.buildingId, wp.id),
-    ),
-  });
-  if (already) return;
+  let minX = segment[0]!.x;
+  let maxX = segment[0]!.x;
+  let minY = segment[0]!.y;
+  let maxY = segment[0]!.y;
+  for (const p of segment) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+
+  const waypoints = await db
+    .select()
+    .from(buildings)
+    .where(
+      and(
+        eq(buildings.mapId, mapId),
+        eq(buildings.type, "waypoint"),
+        gte(buildings.x, minX),
+        lte(buildings.x, maxX),
+        gte(buildings.y, minY),
+        lte(buildings.y, maxY),
+      ),
+    );
+  if (waypoints.length === 0) return;
+
+  const byCell = new Map<string, (typeof waypoints)[number]>();
+  for (const wp of waypoints) {
+    byCell.set(`${wp.x},${wp.y}`, wp);
+  }
+
+  const hitOrder: Array<(typeof waypoints)[number]> = [];
+  const hitIds = new Set<number>();
+  for (const cell of segment) {
+    const wp = byCell.get(`${cell.x},${cell.y}`);
+    if (!wp || wp.ownerId === playerId || hitIds.has(wp.id)) continue;
+    hitIds.add(wp.id);
+    hitOrder.push(wp);
+  }
+  if (hitOrder.length === 0) return;
+
+  const hitBuildingIds = hitOrder.map((wp) => wp.id);
+  const existingPasses = await db
+    .select()
+    .from(waypointPasses)
+    .where(
+      and(
+        eq(waypointPasses.playerId, playerId),
+        inArray(waypointPasses.buildingId, hitBuildingIds),
+      ),
+    );
+  const passed = new Set(existingPasses.map((p) => p.buildingId));
 
   const traveler = await db.query.players.findFirst({
     where: eq(players.id, playerId),
   });
-  if (!traveler || traveler.gold < WAYPOINT_TOLL) return;
+  if (!traveler) return;
 
-  await db
-    .update(players)
-    .set({ gold: traveler.gold - WAYPOINT_TOLL })
-    .where(eq(players.id, playerId));
-  await db
-    .update(players)
-    .set({ gold: sql`${players.gold} + ${WAYPOINT_TOLL}` })
-    .where(eq(players.id, wp.ownerId));
-  await db.insert(waypointPasses).values({
-    playerId,
-    buildingId: wp.id,
-  });
-  await shareExploration(db, wp.ownerId, playerId);
+  let gold = traveler.gold;
+  const ownerGains = new Map<number, number>();
+
+  for (const wp of hitOrder) {
+    if (passed.has(wp.id)) continue;
+    if (gold < WAYPOINT_TOLL) break;
+    gold -= WAYPOINT_TOLL;
+    ownerGains.set(wp.ownerId, (ownerGains.get(wp.ownerId) ?? 0) + WAYPOINT_TOLL);
+    await db.insert(waypointPasses).values({
+      playerId,
+      buildingId: wp.id,
+    });
+    await shareExploration(db, wp.ownerId, playerId, mapId);
+  }
+
+  if (gold !== traveler.gold) {
+    await db
+      .update(players)
+      .set({ gold })
+      .where(eq(players.id, playerId));
+  }
+  for (const [ownerId, gain] of ownerGains) {
+    await db
+      .update(players)
+      .set({ gold: sql`${players.gold} + ${gain}` })
+      .where(eq(players.id, ownerId));
+  }
 }
 
+/**
+ * Catch up travel by elapsed time: jump pathIndex (O(1) pose/gold),
+ * batch waypoints, sample exploration along the corridor.
+ * Mid-stop remains client stopTravel; incomplete jobs keep remaining path.
+ */
 export async function settleTravel(db: Db, playerId: number): Promise<void> {
   const job = await db.query.travelJobs.findFirst({
     where: eq(travelJobs.playerId, playerId),
   });
   if (!job) return;
 
+  const mapId = job.mapId ?? DEFAULT_MAP_ID;
   const path = JSON.parse(job.pathJson) as Point[];
   if (path.length === 0) {
     await db.delete(travelJobs).where(eq(travelJobs.id, job.id));
@@ -119,51 +196,44 @@ export async function settleTravel(db: Db, playerId: number): Promise<void> {
   const steps = Math.floor(elapsed / (TRAVEL_SECONDS_PER_TILE * 1000));
   if (steps <= 0) return;
 
-  let index = job.pathIndex;
-  let goldGain = 0;
-  const exploredBatch: Point[] = [];
+  const fromIndex = job.pathIndex;
+  const maxAdvance = Math.max(0, path.length - 1 - fromIndex);
+  const advance = Math.min(steps, maxAdvance);
+  if (advance <= 0) return;
 
-  for (let s = 0; s < steps && index < path.length - 1; s++) {
-    index += 1;
-    const cell = path[index]!;
-    goldGain += 1;
-    exploredBatch.push(...cellsInVision(cell.x, cell.y));
-    await handleWaypointAt(db, playerId, cell.x, cell.y);
-  }
+  const toIndex = fromIndex + advance;
+  const segment = path.slice(fromIndex + 1, toIndex + 1);
+  const pos = path[toIndex]!;
+  const goldGain = advance;
 
-  const settledMs =
-    new Date(job.lastSettledAt).getTime() +
-    steps * TRAVEL_SECONDS_PER_TILE * 1000;
-  const pos = path[Math.min(index, path.length - 1)]!;
+  const settledMs = last + advance * TRAVEL_SECONDS_PER_TILE * 1000;
+  const finished = toIndex >= path.length - 1;
 
-  if (goldGain > 0) {
-    await db
-      .update(players)
-      .set({
-        x: pos.x,
-        y: pos.y,
-        gold: sql`${players.gold} + ${goldGain}`,
-      })
-      .where(eq(players.id, playerId));
-    await markExploredCells(db, playerId, exploredBatch);
-  } else {
-    await db
-      .update(players)
-      .set({ x: pos.x, y: pos.y })
-      .where(eq(players.id, playerId));
-  }
+  await settleWaypointsOnSegment(db, playerId, mapId, segment);
+  await markExploredCells(
+    db,
+    playerId,
+    collectExploredAlongPath(path, fromIndex, toIndex),
+    mapId,
+  );
 
-  if (index >= path.length - 1) {
+  await db
+    .update(players)
+    .set({
+      x: pos.x,
+      y: pos.y,
+      gold: sql`${players.gold} + ${goldGain}`,
+      ...(finished ? { status: "idle" as const } : {}),
+    })
+    .where(eq(players.id, playerId));
+
+  if (finished) {
     await db.delete(travelJobs).where(eq(travelJobs.id, job.id));
-    await db
-      .update(players)
-      .set({ status: "idle", x: pos.x, y: pos.y })
-      .where(eq(players.id, playerId));
   } else {
     await db
       .update(travelJobs)
       .set({
-        pathIndex: index,
+        pathIndex: toIndex,
         lastSettledAt: new Date(settledMs),
       })
       .where(eq(travelJobs.id, job.id));
@@ -175,7 +245,9 @@ export async function startTravel(
   playerId: number,
   targetX: number,
   targetY: number,
-): Promise<{ ok: true; steps: number; etaSeconds: number } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; steps: number; etaSeconds: number } | { ok: false; error: string }
+> {
   const player = await db.query.players.findFirst({
     where: eq(players.id, playerId),
   });
@@ -188,6 +260,7 @@ export async function startTravel(
   });
   if (!refreshed) return { ok: false, error: "Player not found" };
 
+  const mapId = refreshed.currentMapId ?? DEFAULT_MAP_ID;
   const to = clampToMap(targetX, targetY);
   if (to.x === refreshed.x && to.y === refreshed.y) {
     return { ok: false, error: "Already there" };
@@ -200,6 +273,7 @@ export async function startTravel(
   await db.delete(travelJobs).where(eq(travelJobs.playerId, playerId));
   await db.insert(travelJobs).values({
     playerId,
+    mapId,
     pathJson: JSON.stringify(path),
     pathIndex: 0,
     startedAt: now,
@@ -210,12 +284,112 @@ export async function startTravel(
     .set({ status: "traveling" })
     .where(eq(players.id, playerId));
 
-  // Reveal around start
-  await markExploredCells(db, playerId, cellsInVision(refreshed.x, refreshed.y));
+  await markExploredCells(
+    db,
+    playerId,
+    cellsInVision(refreshed.x, refreshed.y),
+    mapId,
+  );
 
   return {
     ok: true,
     steps,
     etaSeconds: steps * TRAVEL_SECONDS_PER_TILE,
   };
+}
+
+export async function startDirectionalTravel(
+  db: Db,
+  playerId: number,
+  dx: number,
+  dy: number,
+  steps: number,
+): Promise<
+  { ok: true; steps: number; etaSeconds: number } | { ok: false; error: string }
+> {
+  if (dx === 0 && dy === 0) {
+    return { ok: false, error: "Need a direction" };
+  }
+  if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+    return { ok: false, error: "Invalid direction" };
+  }
+  if (steps < 1 || steps > MAX_TRAVEL_STEPS) {
+    return { ok: false, error: `Steps must be 1–${MAX_TRAVEL_STEPS}` };
+  }
+
+  const player = await db.query.players.findFirst({
+    where: eq(players.id, playerId),
+  });
+  if (!player) return { ok: false, error: "Player not found" };
+
+  await settleTravel(db, playerId);
+
+  const refreshed = await db.query.players.findFirst({
+    where: eq(players.id, playerId),
+  });
+  if (!refreshed) return { ok: false, error: "Player not found" };
+
+  const mapId = refreshed.currentMapId ?? DEFAULT_MAP_ID;
+  const path = buildDirectionalPath(
+    { x: refreshed.x, y: refreshed.y },
+    dx,
+    dy,
+    steps,
+  );
+  const moved = path.length - 1;
+  if (moved <= 0) {
+    return { ok: false, error: "Cannot move that way (map edge)" };
+  }
+
+  const now = new Date();
+  await db.delete(travelJobs).where(eq(travelJobs.playerId, playerId));
+  await db.insert(travelJobs).values({
+    playerId,
+    mapId,
+    pathJson: JSON.stringify(path),
+    pathIndex: 0,
+    startedAt: now,
+    lastSettledAt: now,
+  });
+  await db
+    .update(players)
+    .set({ status: "traveling" })
+    .where(eq(players.id, playerId));
+
+  await markExploredCells(
+    db,
+    playerId,
+    cellsInVision(refreshed.x, refreshed.y),
+    mapId,
+  );
+
+  return {
+    ok: true,
+    steps: moved,
+    etaSeconds: moved * TRAVEL_SECONDS_PER_TILE,
+  };
+}
+
+/** Client-authoritative stop: park at (x,y), clear travel job. */
+export async function stopTravel(
+  db: Db,
+  playerId: number,
+  x: number,
+  y: number,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const player = await db.query.players.findFirst({
+    where: eq(players.id, playerId),
+  });
+  if (!player) return { ok: false, error: "Player not found" };
+
+  const mapId = player.currentMapId ?? DEFAULT_MAP_ID;
+  const pos = clampToMap(x, y);
+  await db.delete(travelJobs).where(eq(travelJobs.playerId, playerId));
+  await db
+    .update(players)
+    .set({ x: pos.x, y: pos.y, status: "idle" })
+    .where(eq(players.id, playerId));
+  await markExploredCells(db, playerId, cellsInVision(pos.x, pos.y), mapId);
+
+  return { ok: true };
 }

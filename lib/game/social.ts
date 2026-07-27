@@ -40,6 +40,7 @@ export async function autoFriendNearby(
     .where(
       and(
         ne(players.id, playerId),
+        eq(players.currentMapId, me.currentMapId),
         sql`${players.x} BETWEEN ${me.x - r} AND ${me.x + r}`,
         sql`${players.y} BETWEEN ${me.y - r} AND ${me.y + r}`,
       ),

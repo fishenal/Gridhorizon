@@ -1,10 +1,14 @@
-import Link from "next/link";
+import { cookies } from "next/headers";
 import { auth } from "@/lib/auth";
+import { ACCESS_COOKIE, ACCESS_COOKIE_VALUE } from "@/lib/access";
+import { AccessGateForm } from "@/components/AccessGateForm";
 import { redirect } from "next/navigation";
 
 export default async function HomePage() {
+  const jar = await cookies();
+  const gated = jar.get(ACCESS_COOKIE)?.value === ACCESS_COOKIE_VALUE;
   const session = await auth();
-  if (session?.user) redirect("/play");
+  if (session?.user && gated) redirect("/play");
 
   return (
     <main className="relative flex min-h-full flex-1 flex-col overflow-hidden">
@@ -27,20 +31,7 @@ export default async function HomePage() {
         <p className="max-w-lg text-lg leading-relaxed text-stone-700">
           程序化世界、离线行进结算、迷雾与路标情报。从中心出发，用真实时间丈量距离。
         </p>
-        <div className="flex flex-wrap gap-3">
-          <Link
-            href="/register"
-            className="rounded bg-teal-900 px-5 py-2.5 text-white hover:bg-teal-800"
-          >
-            注册出发
-          </Link>
-          <Link
-            href="/login"
-            className="rounded border border-stone-400 bg-white/70 px-5 py-2.5 hover:bg-white"
-          >
-            登录
-          </Link>
-        </div>
+        <AccessGateForm />
       </div>
     </main>
   );

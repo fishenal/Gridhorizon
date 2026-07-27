@@ -8,13 +8,33 @@ import {
   index,
 } from "drizzle-orm/pg-core";
 
+export const maps = pgTable(
+  "maps",
+  {
+    id: serial("id").primaryKey(),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    seed: integer("seed").notNull(),
+    size: integer("size").notNull().default(8000),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [uniqueIndex("maps_slug_unique").on(t.slug)],
+);
+
 export const players = pgTable("players", {
   id: serial("id").primaryKey(),
   name: text("name").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
-  x: integer("x").notNull().default(2500),
-  y: integer("y").notNull().default(2500),
+  currentMapId: integer("current_map_id")
+    .notNull()
+    .default(1)
+    .references(() => maps.id),
+  x: integer("x").notNull().default(4000),
+  y: integer("y").notNull().default(4000),
   gold: integer("gold").notNull().default(200),
+  xp: integer("xp").notNull().default(0),
   stone: integer("stone").notNull().default(0),
   wood: integer("wood").notNull().default(0),
   ore: integer("ore").notNull().default(0),
@@ -35,13 +55,22 @@ export const exploredChunks = pgTable(
     playerId: integer("player_id")
       .notNull()
       .references(() => players.id, { onDelete: "cascade" }),
+    mapId: integer("map_id")
+      .notNull()
+      .default(1)
+      .references(() => maps.id),
     chunkX: integer("chunk_x").notNull(),
     chunkY: integer("chunk_y").notNull(),
     /** 32x32 = 1024 bits packed as base64 */
     bitmap: text("bitmap").notNull(),
   },
   (t) => [
-    uniqueIndex("explored_chunk_unique").on(t.playerId, t.chunkX, t.chunkY),
+    uniqueIndex("explored_chunk_unique").on(
+      t.playerId,
+      t.mapId,
+      t.chunkX,
+      t.chunkY,
+    ),
   ],
 );
 
@@ -49,6 +78,10 @@ export const tileClaims = pgTable(
   "tile_claims",
   {
     id: serial("id").primaryKey(),
+    mapId: integer("map_id")
+      .notNull()
+      .default(1)
+      .references(() => maps.id),
     x: integer("x").notNull(),
     y: integer("y").notNull(),
     ownerId: integer("owner_id")
@@ -59,13 +92,17 @@ export const tileClaims = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [uniqueIndex("tile_claim_xy").on(t.x, t.y)],
+  (t) => [uniqueIndex("tile_claim_map_xy").on(t.mapId, t.x, t.y)],
 );
 
 export const buildings = pgTable(
   "buildings",
   {
     id: serial("id").primaryKey(),
+    mapId: integer("map_id")
+      .notNull()
+      .default(1)
+      .references(() => maps.id),
     x: integer("x").notNull(),
     y: integer("y").notNull(),
     ownerId: integer("owner_id")
@@ -79,9 +116,10 @@ export const buildings = pgTable(
       .defaultNow(),
   },
   (t) => [
-    uniqueIndex("building_xy").on(t.x, t.y),
+    uniqueIndex("building_map_xy").on(t.mapId, t.x, t.y),
     index("building_owner_idx").on(t.ownerId),
     index("building_type_idx").on(t.type),
+    index("building_map_idx").on(t.mapId),
   ],
 );
 
@@ -91,6 +129,10 @@ export const travelJobs = pgTable("travel_jobs", {
     .notNull()
     .references(() => players.id, { onDelete: "cascade" })
     .unique(),
+  mapId: integer("map_id")
+    .notNull()
+    .default(1)
+    .references(() => maps.id),
   pathJson: text("path_json").notNull(), // JSON number[][] of [x,y] remaining including current
   pathIndex: integer("path_index").notNull().default(0),
   startedAt: timestamp("started_at", { withTimezone: true })
@@ -115,9 +157,7 @@ export const friendships = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [
-    uniqueIndex("friendship_pair").on(t.playerAId, t.playerBId),
-  ],
+  (t) => [uniqueIndex("friendship_pair").on(t.playerAId, t.playerBId)],
 );
 
 export const tradeOffers = pgTable("trade_offers", {
@@ -140,6 +180,10 @@ export const tradeOffers = pgTable("trade_offers", {
 
 export const landOffers = pgTable("land_offers", {
   id: serial("id").primaryKey(),
+  mapId: integer("map_id")
+    .notNull()
+    .default(1)
+    .references(() => maps.id),
   fromPlayerId: integer("from_player_id")
     .notNull()
     .references(() => players.id, { onDelete: "cascade" }),
@@ -169,10 +213,9 @@ export const waypointPasses = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (t) => [
-    uniqueIndex("waypoint_pass_unique").on(t.playerId, t.buildingId),
-  ],
+  (t) => [uniqueIndex("waypoint_pass_unique").on(t.playerId, t.buildingId)],
 );
 
+export type MapRow = typeof maps.$inferSelect;
 export type Player = typeof players.$inferSelect;
 export type Building = typeof buildings.$inferSelect;

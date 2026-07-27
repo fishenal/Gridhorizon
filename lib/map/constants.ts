@@ -1,11 +1,14 @@
-export const MAP_SIZE = 5000;
-export const MAP_CENTER = Math.floor(MAP_SIZE / 2); // 2500
+export const MAP_SIZE = 8000;
+export const MAP_CENTER = Math.floor(MAP_SIZE / 2); // 4000
 export const VISION_RADIUS = 20;
 export const CHUNK_SIZE = 32;
 
 export const TRAVEL_SECONDS_PER_TILE = Number(
-  process.env.TRAVEL_SECONDS_PER_TILE ?? "3",
+  process.env.TRAVEL_SECONDS_PER_TILE ?? "1",
 );
+
+/** Max steps per directional move (client + server). */
+export const MAX_TRAVEL_STEPS = 1000;
 
 export const WORLD_SEED = Number(process.env.WORLD_SEED ?? "424242");
 

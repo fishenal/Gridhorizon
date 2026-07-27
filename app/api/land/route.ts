@@ -5,6 +5,7 @@ import { auth } from "@/lib/auth";
 import { getDb } from "@/lib/db";
 import { buildings, landOffers, players, tileClaims } from "@/lib/db/schema";
 import { settlePlayer } from "@/lib/game/settle";
+import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
 
 const createSchema = z.object({
   action: z.literal("create"),
@@ -26,11 +27,14 @@ export async function GET() {
   }
   const playerId = Number(session.user.id);
   const db = getDb();
+  await ensureDefaultMap(db);
+  const world = await getPlayerWorld(db, playerId);
   const offers = await db
     .select()
     .from(landOffers)
     .where(
       and(
+        eq(landOffers.mapId, world.id),
         eq(landOffers.status, "open"),
         or(
           eq(landOffers.fromPlayerId, playerId),
@@ -49,7 +53,10 @@ export async function POST(req: Request) {
   const playerId = Number(session.user.id);
   const json = await req.json();
   const db = getDb();
+  await ensureDefaultMap(db);
   await settlePlayer(db, playerId);
+  const world = await getPlayerWorld(db, playerId);
+  const mapId = world.id;
 
   if (json.action === "create") {
     const parsed = createSchema.safeParse(json);
@@ -57,9 +64,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Invalid body" }, { status: 400 });
     }
     const { toPlayerId, x, y, priceGold } = parsed.data;
-    // Buyer creates offer to owner
     const claim = await db.query.tileClaims.findFirst({
-      where: and(eq(tileClaims.x, x), eq(tileClaims.y, y)),
+      where: and(
+        eq(tileClaims.mapId, mapId),
+        eq(tileClaims.x, x),
+        eq(tileClaims.y, y),
+      ),
     });
     if (!claim || claim.ownerId !== toPlayerId) {
       return NextResponse.json(
@@ -68,9 +78,13 @@ export async function POST(req: Request) {
       );
     }
     if (toPlayerId === playerId) {
-      return NextResponse.json({ error: "Cannot buy own land" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Cannot buy own land" },
+        { status: 400 },
+      );
     }
     await db.insert(landOffers).values({
+      mapId,
       fromPlayerId: playerId,
       toPlayerId,
       x,
@@ -114,7 +128,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true });
   }
 
-  // accept — seller (owner) accepts buyer's offer
   if (offer.toPlayerId !== playerId) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -132,8 +145,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Buyer lacks gold" }, { status: 400 });
   }
 
+  const offerMapId = offer.mapId;
   const claim = await db.query.tileClaims.findFirst({
-    where: and(eq(tileClaims.x, offer.x), eq(tileClaims.y, offer.y)),
+    where: and(
+      eq(tileClaims.mapId, offerMapId),
+      eq(tileClaims.x, offer.x),
+      eq(tileClaims.y, offer.y),
+    ),
   });
   if (!claim || claim.ownerId !== seller.id) {
     return NextResponse.json({ error: "Claim mismatch" }, { status: 400 });
@@ -154,7 +172,13 @@ export async function POST(req: Request) {
   await db
     .update(buildings)
     .set({ ownerId: buyer.id })
-    .where(and(eq(buildings.x, offer.x), eq(buildings.y, offer.y)));
+    .where(
+      and(
+        eq(buildings.mapId, offerMapId),
+        eq(buildings.x, offer.x),
+        eq(buildings.y, offer.y),
+      ),
+    );
   await db
     .update(landOffers)
     .set({ status: "accepted" })
