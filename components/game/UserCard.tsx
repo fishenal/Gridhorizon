@@ -1,76 +1,289 @@
 "use client";
 
+import { useState } from "react";
+import type { Terrain } from "@/lib/map/generator";
+import { FLAG_COST } from "@/lib/map/constants";
+import {
+  AVATAR_EMOJI_CHOICES,
+  FLAG_RANGE_RADIUS,
+  normalizePlayerEmoji,
+} from "@/lib/game/playerStyle";
+import type { SelectedFlag, SelectedTown } from "@/components/game/MapCanvas";
+
+export type BuildKind = "flag" | "town";
+
 type Props = {
   name: string;
+  playerId: number;
+  emoji?: string;
   gold?: number;
   xp?: number;
   x: number;
   y: number;
   isSelf: boolean;
+  terrain?: Terrain;
+  tileOccupied?: boolean;
   busy?: boolean;
-  onClose: () => void;
-  onWaypoint?: () => void;
+  onBuildSelect?: (kind: BuildKind) => void;
+  onEmojiChange?: (emoji: string) => void;
 };
+
+const TYPE_LABEL: Record<string, string> = {
+  flag: "Flag",
+  waypoint: "Flag",
+  town: "Town",
+};
+
+function buildOptions(terrain: Terrain | undefined): BuildKind[] {
+  const opts: BuildKind[] = ["flag"];
+  if (terrain === "grass") opts.unshift("town");
+  return opts;
+}
+
+function EmojiFace({ emoji, size = 40 }: { emoji: string; size?: number }) {
+  return (
+    <span
+      className="inline-flex shrink-0 items-center justify-center leading-none"
+      style={{ fontSize: size * 0.7 }}
+      aria-hidden
+    >
+      {emoji}
+    </span>
+  );
+}
 
 export function UserCard({
   name,
+  emoji,
   gold,
   xp,
   x,
   y,
   isSelf,
+  terrain,
+  tileOccupied,
   busy,
-  onClose,
-  onWaypoint,
+  onBuildSelect,
+  onEmojiChange,
 }: Props) {
+  const options = isSelf && onBuildSelect ? buildOptions(terrain) : [];
+  const face = normalizePlayerEmoji(emoji);
+
   return (
-    <div className="pointer-events-auto w-44 rounded-xl border border-stone-200 bg-white/95 p-3 shadow-lg backdrop-blur">
-      <div className="mb-2 flex items-start justify-between gap-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <div
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-stone-800 bg-[#f5d76e]"
-            aria-hidden
-          >
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-              <circle cx="9" cy="10" r="1.2" fill="#1a1a1a" />
-              <circle cx="15" cy="10" r="1.2" fill="#1a1a1a" />
-              <path
-                d="M8 14c1.2 1.5 2.8 2.2 4 2.2s2.8-.7 4-2.2"
-                stroke="#1a1a1a"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-              />
-            </svg>
-          </div>
-          <p className="truncate text-sm font-medium text-pink-600">{name}</p>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="shrink-0 text-xs text-stone-400 hover:text-stone-700"
-        >
-          关闭
-        </button>
+    <div className="pointer-events-auto w-48 rounded-xl border border-stone-200 bg-white/95 p-3 shadow-lg backdrop-blur">
+      <div className="mb-2 flex min-w-0 items-center gap-2">
+        <EmojiFace emoji={face} />
+        <p className="truncate text-sm font-medium text-pink-600">{name}</p>
       </div>
       <p className="text-sm text-pink-600">
-        坐标：({x}, {y})
+        Coords: ({x}, {y})
       </p>
       {isSelf ? (
         <>
-          <p className="text-sm text-pink-600">金钱：{gold ?? 0}</p>
-          <p className="mb-2 text-sm text-pink-600">经验：{xp ?? 0}</p>
-          {onWaypoint ? (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onWaypoint}
-              className="w-full rounded-lg border border-pink-300 bg-white px-2 py-1.5 text-sm text-pink-700 hover:bg-pink-100 disabled:opacity-40"
-            >
-              设立路标
-            </button>
+          <p className="text-sm text-pink-600">Gold: {gold ?? 0}</p>
+          <p className="mb-2 text-sm text-pink-600">XP: {xp ?? 0}</p>
+          {onEmojiChange ? (
+            <div className="mb-2 border-t border-stone-100 pt-2">
+              <p className="mb-1 text-[11px] text-stone-500">Avatar</p>
+              <div className="flex flex-wrap gap-1">
+                {AVATAR_EMOJI_CHOICES.map((e) => (
+                  <button
+                    key={e}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onEmojiChange(e)}
+                    className={`flex h-7 w-7 items-center justify-center text-sm disabled:opacity-40 ${
+                      e === face
+                        ? "bg-pink-50 ring-1 ring-pink-400"
+                        : "hover:bg-stone-50"
+                    }`}
+                    aria-label={`Choose ${e}`}
+                  >
+                    {e}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {tileOccupied ? (
+            <p className="text-[11px] text-stone-500">
+              This tile already has a building
+            </p>
+          ) : options.length > 0 ? (
+            <div className="mt-1 space-y-1.5 border-t border-stone-100 pt-2">
+              <p className="text-[11px] text-stone-500">Build</p>
+              {options.map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onBuildSelect?.(kind)}
+                  className="w-full rounded-lg border border-pink-300 bg-white px-2 py-1.5 text-sm text-pink-700 hover:bg-pink-100 disabled:opacity-40"
+                >
+                  {kind === "flag" ? `Flag (${FLAG_COST} gold)` : "Town"}
+                </button>
+              ))}
+            </div>
           ) : null}
         </>
       ) : null}
+    </div>
+  );
+}
+
+export { TYPE_LABEL };
+
+type FlagCardProps = {
+  flag: SelectedFlag;
+};
+
+function formatCreatedAt(iso: string | null) {
+  if (!iso) return "Unknown";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "Unknown";
+  return d.toLocaleString("en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export function FlagCard({ flag }: FlagCardProps) {
+  const side = (flag.tollRadius ?? FLAG_RANGE_RADIUS) * 2 + 1;
+  const ownerEmoji = normalizePlayerEmoji(flag.ownerEmoji);
+  return (
+    <div className="pointer-events-auto w-48 rounded-xl border border-stone-200 bg-white/95 p-3 shadow-lg backdrop-blur">
+      <div className="mb-2 flex min-w-0 items-center gap-2">
+        <EmojiFace emoji="🚩" />
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-pink-600">
+            {flag.name}
+          </p>
+          <p className="truncate text-[11px] text-stone-500">Flag</p>
+        </div>
+      </div>
+      <div className="mb-2 flex min-w-0 items-center gap-2 text-xs text-stone-600">
+        <span className="text-base leading-none" aria-hidden>
+          {ownerEmoji}
+        </span>
+        <span className="truncate">Owner · {flag.ownerName}</span>
+      </div>
+      <p className="text-sm text-pink-600">
+        Coords: ({flag.x}, {flag.y})
+      </p>
+      <p className="text-sm text-pink-600">
+        Created: {formatCreatedAt(flag.createdAt)}
+      </p>
+      <p className="mt-1 text-[11px] text-stone-500">
+        Influence {side}×{side} (centered on flag)
+      </p>
+    </div>
+  );
+}
+
+type TownCardProps = {
+  town: SelectedTown;
+};
+
+export function TownCard({ town }: TownCardProps) {
+  const ownerEmoji = normalizePlayerEmoji(town.ownerEmoji);
+  return (
+    <div className="pointer-events-auto w-48 rounded-xl border border-stone-200 bg-white/95 p-3 shadow-lg backdrop-blur">
+      <div className="mb-2 flex min-w-0 items-center gap-2">
+        <EmojiFace emoji="🏘️" />
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-pink-600">
+            {town.name}
+          </p>
+          <p className="truncate text-[11px] text-stone-500">Town</p>
+        </div>
+      </div>
+      <div className="mb-2 flex min-w-0 items-center gap-2 text-xs text-stone-600">
+        <span className="text-base leading-none" aria-hidden>
+          {ownerEmoji}
+        </span>
+        <span className="truncate">Owner · {town.ownerName}</span>
+      </div>
+      <p className="text-sm text-pink-600">
+        Coords: ({town.x}, {town.y})
+      </p>
+      <p className="text-sm text-pink-600">Level: {town.level}</p>
+      <p className="text-sm text-pink-600">
+        Created: {formatCreatedAt(town.createdAt)}
+      </p>
+    </div>
+  );
+}
+
+type DialogProps = {
+  kind: BuildKind;
+  busy?: boolean;
+  onConfirm: (name: string) => void;
+  onCancel: () => void;
+};
+
+export function BuildNameDialog({
+  kind,
+  busy,
+  onConfirm,
+  onCancel,
+}: DialogProps) {
+  const [value, setValue] = useState("");
+  const title = kind === "flag" ? "Build flag" : "Build town";
+  const trimmed = value.trim();
+  const valid = trimmed.length >= 1 && trimmed.length <= 24;
+
+  return (
+    <div className="pointer-events-auto fixed inset-0 z-[200] flex items-center justify-center bg-black/35 p-4">
+      <div
+        className="w-full max-w-xs rounded-xl border border-stone-200 bg-white p-4 shadow-xl"
+        role="dialog"
+        aria-labelledby="build-name-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2
+          id="build-name-title"
+          className="text-base font-semibold text-stone-800"
+        >
+          {title}
+        </h2>
+        <p className="mt-1 text-xs text-stone-500">
+          Enter a name (1–24 characters)
+        </p>
+        <input
+          autoFocus
+          className="mt-3 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm"
+          value={value}
+          maxLength={24}
+          disabled={busy}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && valid && !busy) onConfirm(trimmed);
+            if (e.key === "Escape") onCancel();
+          }}
+          placeholder={kind === "flag" ? "Flag name" : "Town name"}
+        />
+        <div className="mt-3 flex gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onCancel}
+            className="flex-1 rounded-lg border border-stone-300 py-2 text-sm text-stone-700 hover:bg-stone-50 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={busy || !valid}
+            onClick={() => onConfirm(trimmed)}
+            className="flex-1 rounded-lg bg-stone-900 py-2 text-sm text-white hover:bg-stone-800 disabled:opacity-50"
+          >
+            Confirm
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

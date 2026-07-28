@@ -7,11 +7,15 @@ import { generateTile } from "@/lib/map/generator";
 const SIZE = 144;
 
 const TERRAIN_RGB: Record<string, [number, number, number]> = {
-  ocean: [61, 158, 201],
-  plain: [107, 143, 78],
-  mountain: [107, 91, 75],
-  snow: [217, 228, 236],
-  coast: [194, 164, 107],
+  water: [59, 142, 201],
+  grass: [155, 200, 106],
+  forest: [47, 107, 60],
+  mountain: [122, 99, 82],
+  desert: [230, 211, 145],
+  ocean: [59, 142, 201],
+  plain: [155, 200, 106],
+  snow: [230, 211, 145],
+  coast: [230, 211, 145],
 };
 
 type Props = {
@@ -116,7 +120,7 @@ export function Minimap({
         width={SIZE}
         height={SIZE}
         className="block"
-        aria-label="探索缩略图"
+        aria-label="Exploration minimap"
       />
     </div>
   );

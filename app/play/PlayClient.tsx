@@ -11,8 +11,19 @@ import {
 } from "@/components/game/MapCanvas";
 import { MovePad, type TravelProgress } from "@/components/game/MovePad";
 import { Minimap } from "@/components/game/Minimap";
-import { UserCard } from "@/components/game/UserCard";
+import { UserCard, FlagCard, TownCard, BuildNameDialog, type BuildKind } from "@/components/game/UserCard";
+import { MapPointPopup } from "@/components/game/MapPointPopup";
+import { generateTile } from "@/lib/map/generator";
+import {
+  FLAG_RANGE_RADIUS,
+  normalizePlayerEmoji,
+} from "@/lib/game/playerStyle";
 import { ZoomSlider } from "@/components/game/ZoomSlider";
+import {
+  JournalPanel,
+  makeLocalActivity,
+  type ActivityEntry,
+} from "@/components/game/JournalPanel";
 import { buildDirectionalPath, type Point } from "@/lib/game/path";
 import {
   ingestExploredFromTiles,
@@ -36,6 +47,7 @@ type MeResponse = {
     ore: number;
     food: number;
     status: string;
+    emoji: string;
   };
   travel: {
     pathIndex: number;
@@ -55,29 +67,19 @@ type MeResponse = {
 
 type ViewportResponse = {
   center: { x: number; y: number };
-  player: { x: number; y: number; id: number; name: string };
+  player: { x: number; y: number; id: number; name: string; emoji?: string };
   visionRadius: number;
   tiles: ViewportTile[];
-  players: Array<{ id: number; name: string; x: number; y: number }>;
+  players: Array<{
+    id: number;
+    name: string;
+    x: number;
+    y: number;
+    emoji?: string;
+  }>;
 };
 
 type Selection = SelectedEntity | null;
-
-function clampPopup(
-  left: number,
-  top: number,
-  width: number,
-  height: number,
-  containerW: number,
-  containerH: number,
-) {
-  const maxLeft = Math.max(8, containerW - width - 8);
-  const maxTop = Math.max(8, containerH - height - 8);
-  return {
-    left: Math.max(8, Math.min(left, maxLeft)),
-    top: Math.max(8, Math.min(top, maxTop)),
-  };
-}
 
 async function readJson<T>(res: Response): Promise<T | null> {
   const text = await res.text();
@@ -108,6 +110,7 @@ export default function PlayClient() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [traveling, setTraveling] = useState(false);
+  const [pendingBuild, setPendingBuild] = useState<BuildKind | null>(null);
   const [travelProgress, setTravelProgress] = useState<TravelProgress | null>(
     null,
   );
@@ -140,11 +143,33 @@ export default function PlayClient() {
   const [mapZoomLevel, setMapZoomLevel] = useState(0);
   const mapZoomLevelRef = useRef(0);
   const [exploredRevision, setExploredRevision] = useState(0);
+  const [journalTick, setJournalTick] = useState(0);
+  const [localLogs, setLocalLogs] = useState<ActivityEntry[]>([]);
+  const localLogSeqRef = useRef(0);
   const hoverCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
 
-  const HOVER_CLOSE_MS = 180;
+  const pushLocalLog = useCallback(
+    (type: string, payload: Record<string, unknown>) => {
+      localLogSeqRef.current += 1;
+      const id = -localLogSeqRef.current;
+      const entry = makeLocalActivity(type, payload, id);
+      setLocalLogs((prev) => [entry, ...prev].slice(0, 50));
+      return id;
+    },
+    [],
+  );
+
+  const removeLocalLog = useCallback((id: number) => {
+    setLocalLogs((prev) => prev.filter((e) => e.id !== id));
+  }, []);
+
+  const onLocalLogsMatched = useCallback((ids: number[]) => {
+    if (ids.length === 0) return;
+    const drop = new Set(ids);
+    setLocalLogs((prev) => prev.filter((e) => !drop.has(e.id)));
+  }, []);
 
   const cancelCloseEntity = useCallback(() => {
     if (hoverCloseTimerRef.current) {
@@ -158,28 +183,19 @@ export default function PlayClient() {
     hoverCloseTimerRef.current = setTimeout(() => {
       hoverCloseTimerRef.current = null;
       setSelection(null);
-    }, HOVER_CLOSE_MS);
+    }, 180);
   }, [cancelCloseEntity]);
 
-  const openEntity = useCallback(
-    (entity: SelectedEntity) => {
-      cancelCloseEntity();
-      setSelection(entity);
+  const onPointSelect = useCallback(
+    (point: SelectedEntity | null) => {
+      if (point) {
+        cancelCloseEntity();
+        setSelection(point);
+      } else {
+        scheduleCloseEntity();
+      }
     },
-    [cancelCloseEntity],
-  );
-
-  const closeEntity = useCallback(() => {
-    cancelCloseEntity();
-    setSelection(null);
-  }, [cancelCloseEntity]);
-
-  const onEntityHoverChange = useCallback(
-    (entity: SelectedEntity | null) => {
-      if (entity) openEntity(entity);
-      else scheduleCloseEntity();
-    },
-    [openEntity, scheduleCloseEntity],
+    [cancelCloseEntity, scheduleCloseEntity],
   );
 
   useEffect(() => {
@@ -374,16 +390,18 @@ export default function PlayClient() {
   }, []);
 
   const mapPlayer = useMemo(() => {
-    if (!viewport) return null;
+    if (!viewport || !me) return null;
     return {
-      id: viewport.player.id,
-      name: viewport.player.name,
+      id: me.player.id,
+      name: me.player.name,
       x: viewport.player.x,
       y: viewport.player.y,
+      emoji: normalizePlayerEmoji(me.player.emoji),
     };
   }, [
-    viewport?.player.id,
-    viewport?.player.name,
+    me?.player.id,
+    me?.player.name,
+    me?.player.emoji,
     viewport?.player.x,
     viewport?.player.y,
   ]);
@@ -549,6 +567,7 @@ export default function PlayClient() {
           true,
         );
       }
+      setJournalTick((t) => t + 1);
     } catch {
       // soft sync — ignore network blips
     }
@@ -561,15 +580,27 @@ export default function PlayClient() {
   }, []);
 
   function finishLocalTravel(end: Point) {
+    const origin = travelOriginRef.current;
+    const target = travelTargetRef.current;
     stopLocalTravelTimer();
     clearTravelUi();
     applyLocalPos(end, "idle");
+    pushLocalLog("travel_arrive", {
+      at: end,
+      from: origin ?? undefined,
+      to: target ?? undefined,
+    });
     void (async () => {
       try {
         await fetch("/api/travel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "stop", x: end.x, y: end.y }),
+          body: JSON.stringify({
+            mode: "stop",
+            x: end.x,
+            y: end.y,
+            reason: "arrived",
+          }),
         });
       } catch {
         // ignore — settle on softRefresh will catch up
@@ -616,6 +647,14 @@ export default function PlayClient() {
         return;
       }
       travelIndexRef.current = next;
+      // +1 gold per step (server confirms on settle/stop)
+      setMe((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          player: { ...prev.player, gold: prev.player.gold + 1 },
+        };
+      });
       const pos = p[next]!;
       updateTravelProgress(next, p.length);
       if (next >= p.length - 1) {
@@ -632,15 +671,27 @@ export default function PlayClient() {
     if (!travelingRef.current) return;
     const pos = displayPosRef.current;
     if (!pos) return;
+    const origin = travelOriginRef.current;
+    const target = travelTargetRef.current;
     stopLocalTravelTimer();
     clearTravelUi();
     applyLocalPos(pos, "idle");
+    pushLocalLog("travel_stop", {
+      at: pos,
+      from: origin ?? undefined,
+      to: target ?? undefined,
+    });
     void (async () => {
       try {
         await fetch("/api/travel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "stop", x: pos.x, y: pos.y }),
+          body: JSON.stringify({
+            mode: "stop",
+            x: pos.x,
+            y: pos.y,
+            reason: "manual",
+          }),
         });
       } catch {
         // ignore — local stop already applied
@@ -659,11 +710,18 @@ export default function PlayClient() {
     };
     const path = buildDirectionalPath(from, dx, dy, steps);
     if (path.length < 2) {
-      setError("无法朝该方向移动（地图边缘）");
+      setError("Can't move that way (map edge)");
       return;
     }
 
     const origin = path[0]!;
+    const target = path[path.length - 1]!;
+    const moved = path.length - 1;
+    const startLogId = pushLocalLog("travel_start", {
+      from: origin,
+      to: target,
+      steps: moved,
+    });
     startLocalTravel(path, me.config.travelSecondsPerTile);
 
     void (async () => {
@@ -679,13 +737,20 @@ export default function PlayClient() {
           const here = displayPosRef.current ?? origin;
           stopLocalTravelTimer();
           clearTravelUi();
-          setError(data?.error ?? "行进失败");
+          removeLocalLog(startLogId);
+          setError(data?.error ?? "Travel failed");
           if (progressed) {
             applyLocalPos(here, "idle");
+            pushLocalLog("travel_stop", { at: here, from: origin, to: target });
             void fetch("/api/travel", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ mode: "stop", x: here.x, y: here.y }),
+              body: JSON.stringify({
+                mode: "stop",
+                x: here.x,
+                y: here.y,
+                reason: "manual",
+              }),
             }).finally(() => void softRefresh());
           } else {
             applyLocalPos(origin, "idle");
@@ -693,18 +758,26 @@ export default function PlayClient() {
           }
           return;
         }
+        setJournalTick((t) => t + 1);
       } catch {
         const progressed = travelIndexRef.current > 0;
         const here = displayPosRef.current ?? origin;
         stopLocalTravelTimer();
         clearTravelUi();
-        setError("行进失败");
+        removeLocalLog(startLogId);
+        setError("Travel failed");
         if (progressed) {
           applyLocalPos(here, "idle");
+          pushLocalLog("travel_stop", { at: here, from: origin, to: target });
           void fetch("/api/travel", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ mode: "stop", x: here.x, y: here.y }),
+            body: JSON.stringify({
+              mode: "stop",
+              x: here.x,
+              y: here.y,
+              reason: "manual",
+            }),
           }).finally(() => void softRefresh());
         } else {
           applyLocalPos(origin, "idle");
@@ -714,62 +787,132 @@ export default function PlayClient() {
     })();
   }
 
-  async function onWaypoint() {
+  async function onConfirmBuild(kind: BuildKind, name: string) {
     if (!me || travelingRef.current) return;
     const x = me.player.x;
     const y = me.player.y;
     setBusy(true);
     setError("");
+    const buildLogId = pushLocalLog("build", {
+      buildingType: kind,
+      name,
+      x,
+      y,
+    });
     try {
       const res = await fetch("/api/build", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "waypoint",
-          x,
-          y,
-          message: "路标",
-        }),
+        body: JSON.stringify({ action: kind, x, y, name }),
       });
       const data = await readJson<{ error?: string }>(res);
       if (!res.ok) {
-        setError(data?.error ?? "操作失败");
+        removeLocalLog(buildLogId);
+        setError(data?.error ?? "Build failed");
         return;
       }
+      setPendingBuild(null);
+      // Optimistic map marker before softRefresh returns
+      overlaysRef.current.set(`${x},${y}`, {
+        building: {
+          id: -1,
+          type: kind,
+          ownerId: me.player.id,
+          ownerName: me.player.name,
+          ownerEmoji: normalizePlayerEmoji(me.player.emoji),
+          level: 1,
+          name,
+          message: name,
+          createdAt: new Date().toISOString(),
+          tollRadius: kind === "flag" ? FLAG_RANGE_RADIUS : null,
+        },
+        claim: overlaysRef.current.get(`${x},${y}`)?.claim ?? null,
+      });
+      const pos = displayPosRef.current ?? { x, y };
+      const tiles = rebuildFogAt(pos);
+      setViewport((prev) =>
+        prev
+          ? {
+              ...prev,
+              tiles,
+            }
+          : prev,
+      );
+      setExploredRevision((n) => n + 1);
       void softRefresh();
     } catch {
-      setError("操作失败");
+      removeLocalLog(buildLogId);
+      setError("Build failed");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onEmojiChange(emoji: string) {
+    if (!me) return;
+    const prev = me.player.emoji;
+    setMe((m) =>
+      m
+        ? { ...m, player: { ...m.player, emoji } }
+        : m,
+    );
+    try {
+      const res = await fetch("/api/player/emoji", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ emoji }),
+      });
+      if (!res.ok) {
+        setMe((m) =>
+          m ? { ...m, player: { ...m.player, emoji: prev } } : m,
+        );
+        setError("Could not update avatar");
+      }
+    } catch {
+      setMe((m) =>
+        m ? { ...m, player: { ...m.player, emoji: prev } } : m,
+      );
+      setError("Could not update avatar");
     }
   }
 
   if (!me || !viewport) {
     return (
       <main className="flex h-dvh items-center justify-center bg-white text-stone-600">
-        加载世界中…
+        Loading world…
       </main>
     );
   }
 
-  const ENTITY_W = 176;
-  const ENTITY_H = 140;
-  const GAP = 10;
-  const halfCell = Math.max(8, anchors.cellSize / 2);
+  const ENTITY_W = 192;
+  const ENTITY_H =
+    selection?.type === "player" && selection.id === me.player.id ? 280 : 168;
 
-  const entityPopupPos = (() => {
-    if (!anchors.entity || !selection) return null;
+  const selfTerrain =
+    selection?.type === "player" && selection.id === me.player.id
+      ? generateTile(
+          me.player.x,
+          me.player.y,
+          me.config.worldSeed ?? WORLD_SEED,
+        )
+      : null;
+  const selfTileKey = `${me.player.x},${me.player.y}`;
+  const selfOccupied = Boolean(
+    selection?.type === "player" &&
+      selection.id === me.player.id &&
+      overlaysRef.current.get(selfTileKey)?.building,
+  );
+
+  const popupAnchor = (() => {
+    if (!selection || !anchors.entity) return null;
     if (
       !Number.isFinite(anchors.entity.x) ||
       !Number.isFinite(anchors.entity.y)
     ) {
       return null;
     }
-    const rawLeft = anchors.entity.x - halfCell - ENTITY_W - GAP;
-    const above = anchors.entity.y - halfCell - ENTITY_H - GAP;
-    const rawTop =
-      above < 8 ? anchors.entity.y + halfCell + GAP : above;
-    return clampPopup(rawLeft, rawTop, ENTITY_W, ENTITY_H, mapSize.w, mapSize.h);
+    // Anchors are already map-area / wrap local
+    return anchors.entity;
   })();
 
   return (
@@ -791,8 +934,8 @@ export default function PlayClient() {
           others={viewport.players}
           visionRadius={viewport.visionRadius}
           viewRadius={viewRadiusForZoom(mapZoomLevel, viewport.visionRadius)}
-          selectedEntityId={selection?.id ?? null}
-          onEntityHoverChange={onEntityHoverChange}
+          selectedPoint={selection}
+          onPointSelect={onPointSelect}
           onAnchorsChange={onAnchorsChange}
         />
 
@@ -811,31 +954,59 @@ export default function PlayClient() {
             />
           </div>
 
-          {selection && entityPopupPos ? (
-            <div
-              className="pointer-events-auto absolute left-0 top-0"
-              style={{
-                transform: `translate(${entityPopupPos.left}px, ${entityPopupPos.top}px)`,
-              }}
+          <div className="absolute right-4 top-4 z-20">
+            <JournalPanel
+              refreshToken={journalTick}
+              localLogs={localLogs}
+              onLocalLogsMatched={onLocalLogsMatched}
+            />
+          </div>
+
+          {selection && popupAnchor ? (
+            <MapPointPopup
+              anchor={popupAnchor}
+              cellSize={anchors.cellSize}
+              mapW={mapSize.w}
+              mapH={mapSize.h}
+              width={ENTITY_W}
+              height={ENTITY_H}
               onMouseEnter={cancelCloseEntity}
               onMouseLeave={scheduleCloseEntity}
             >
-              <UserCard
-                name={selection.name}
-                isSelf={selection.id === me.player.id}
-                gold={me.player.gold}
-                xp={me.player.xp ?? 0}
-                x={selection.x}
-                y={selection.y}
-                busy={busy || traveling}
-                onClose={closeEntity}
-                onWaypoint={
-                  selection.id === me.player.id
-                    ? () => void onWaypoint()
-                    : undefined
-                }
-              />
-            </div>
+              {selection.type === "flag" ? (
+                <FlagCard flag={selection} />
+              ) : selection.type === "town" ? (
+                <TownCard town={selection} />
+              ) : (
+                <UserCard
+                  name={selection.name}
+                  playerId={selection.id}
+                  emoji={
+                    selection.id === me.player.id
+                      ? me.player.emoji
+                      : selection.emoji
+                  }
+                  isSelf={selection.id === me.player.id}
+                  gold={me.player.gold}
+                  xp={me.player.xp ?? 0}
+                  x={selection.x}
+                  y={selection.y}
+                  terrain={selfTerrain?.terrain}
+                  tileOccupied={selfOccupied}
+                  busy={busy || traveling}
+                  onBuildSelect={
+                    selection.id === me.player.id
+                      ? (kind) => setPendingBuild(kind)
+                      : undefined
+                  }
+                  onEmojiChange={
+                    selection.id === me.player.id
+                      ? (emoji) => void onEmojiChange(emoji)
+                      : undefined
+                  }
+                />
+              )}
+            </MapPointPopup>
           ) : null}
 
           <div className="absolute bottom-4 left-4 z-20">
@@ -857,6 +1028,15 @@ export default function PlayClient() {
           </div>
         </div>
       </div>
+
+      {pendingBuild ? (
+        <BuildNameDialog
+          kind={pendingBuild}
+          busy={busy}
+          onCancel={() => setPendingBuild(null)}
+          onConfirm={(name) => void onConfirmBuild(pendingBuild, name)}
+        />
+      ) : null}
     </main>
   );
 }

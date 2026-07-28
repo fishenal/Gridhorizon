@@ -26,10 +26,12 @@ export default async function HomePage() {
           Gridhorizon
         </p>
         <h1 className="max-w-xl text-4xl font-semibold leading-tight tracking-tight text-stone-900 sm:text-5xl">
-          横跨五千格的异步探索
+          Asynchronous exploration across thousands of tiles
         </h1>
         <p className="max-w-lg text-lg leading-relaxed text-stone-700">
-          程序化世界、离线行进结算、迷雾与路标情报。从中心出发，用真实时间丈量距离。
+          A procedural world with offline travel settlement, fog of war, and
+          waypoint intel. Start from the center and measure distance in real
+          time.
         </p>
         <AccessGateForm />
       </div>

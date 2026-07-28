@@ -12,6 +12,7 @@ import {
 import { markExploredCells } from "@/lib/map/explore";
 import { VISION_RADIUS } from "@/lib/map/constants";
 import { DEFAULT_MAP_ID, ensureDefaultMap } from "@/lib/map/world";
+import { DEFAULT_PLAYER_EMOJI } from "@/lib/game/playerStyle";
 
 const bodySchema = z.object({
   name: z.string().trim().min(2).max(24),
@@ -51,6 +52,7 @@ export async function POST(req: Request) {
         y: MAP_CENTER,
         gold: INITIAL_GOLD,
         food: INITIAL_FOOD,
+        emoji: DEFAULT_PLAYER_EMOJI,
       })
       .returning();
 

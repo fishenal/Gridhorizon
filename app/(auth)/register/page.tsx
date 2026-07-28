@@ -24,7 +24,7 @@ export default function RegisterPage() {
     const data = await reg.json();
     if (!reg.ok) {
       setLoading(false);
-      setError(data.error ?? "注册失败");
+      setError(data.error ?? "Registration failed");
       return;
     }
     const res = await signIn("credentials", {
@@ -34,7 +34,7 @@ export default function RegisterPage() {
     });
     setLoading(false);
     if (res?.error) {
-      setError("注册成功但登录失败，请手动登录");
+      setError("Registered, but login failed. Please sign in manually.");
       return;
     }
     router.push("/play");
@@ -45,14 +45,14 @@ export default function RegisterPage() {
     <main className="mx-auto flex min-h-full w-full max-w-md flex-col justify-center gap-6 px-6 py-16">
       <div>
         <p className="text-sm tracking-wide text-teal-700">Gridhorizon</p>
-        <h1 className="mt-1 text-3xl font-semibold text-stone-900">注册</h1>
+        <h1 className="mt-1 text-3xl font-semibold text-stone-900">Register</h1>
         <p className="mt-2 text-stone-600">
-          出生在地图中心 (4000, 4000)，初始 200 金币。
+          You spawn at the map center (4000, 4000) with 200 gold.
         </p>
       </div>
       <form onSubmit={onSubmit} className="flex flex-col gap-4">
         <label className="flex flex-col gap-1 text-sm">
-          玩家名
+          Player name
           <input
             className="rounded border border-stone-300 bg-white px-3 py-2"
             value={name}
@@ -63,7 +63,7 @@ export default function RegisterPage() {
           />
         </label>
         <label className="flex flex-col gap-1 text-sm">
-          密码
+          Password
           <input
             type="password"
             className="rounded border border-stone-300 bg-white px-3 py-2"
@@ -79,13 +79,13 @@ export default function RegisterPage() {
           disabled={loading}
           className="rounded bg-teal-800 px-4 py-2.5 text-white hover:bg-teal-700 disabled:opacity-60"
         >
-          {loading ? "创建中…" : "开始探索"}
+          {loading ? "Creating…" : "Start exploring"}
         </button>
       </form>
       <p className="text-sm text-stone-600">
-        已有账号？{" "}
+        Already have an account?{" "}
         <Link href="/login" className="text-teal-800 underline">
-          登录
+          Log in
         </Link>
       </p>
     </main>

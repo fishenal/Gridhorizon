@@ -21,9 +21,16 @@ import {
   type Point,
 } from "@/lib/game/path";
 import { DEFAULT_MAP_ID } from "@/lib/map/world";
+import {
+  logTravelArrive,
+  logTravelStart,
+  logTravelStop,
+} from "@/lib/game/activityLog";
 
 export type { Point } from "@/lib/game/path";
 export { buildDirectionalPath, buildPath, clampToMap } from "@/lib/game/path";
+
+export type StopReason = "manual" | "arrived";
 
 function cellsInVision(cx: number, cy: number): Point[] {
   const cells: Point[] = [];
@@ -202,14 +209,13 @@ export async function settleTravel(db: Db, playerId: number): Promise<void> {
   if (advance <= 0) return;
 
   const toIndex = fromIndex + advance;
-  const segment = path.slice(fromIndex + 1, toIndex + 1);
   const pos = path[toIndex]!;
   const goldGain = advance;
 
   const settledMs = last + advance * TRAVEL_SECONDS_PER_TILE * 1000;
   const finished = toIndex >= path.length - 1;
 
-  await settleWaypointsOnSegment(db, playerId, mapId, segment);
+  // Nearby/flag tolls deferred — keep settleWaypointsOnSegment for later.
   await markExploredCells(
     db,
     playerId,
@@ -229,6 +235,11 @@ export async function settleTravel(db: Db, playerId: number): Promise<void> {
 
   if (finished) {
     await db.delete(travelJobs).where(eq(travelJobs.id, job.id));
+    await logTravelArrive(db, playerId, mapId, {
+      at: pos,
+      from: path[0],
+      to: path[path.length - 1],
+    });
   } else {
     await db
       .update(travelJobs)
@@ -290,6 +301,12 @@ export async function startTravel(
     cellsInVision(refreshed.x, refreshed.y),
     mapId,
   );
+
+  await logTravelStart(db, playerId, mapId, {
+    from: { x: refreshed.x, y: refreshed.y },
+    to,
+    steps,
+  });
 
   return {
     ok: true,
@@ -363,6 +380,12 @@ export async function startDirectionalTravel(
     mapId,
   );
 
+  await logTravelStart(db, playerId, mapId, {
+    from: { x: refreshed.x, y: refreshed.y },
+    to: path[path.length - 1]!,
+    steps: moved,
+  });
+
   return {
     ok: true,
     steps: moved,
@@ -370,26 +393,72 @@ export async function startDirectionalTravel(
   };
 }
 
-/** Client-authoritative stop: park at (x,y), clear travel job. */
+/** Client-authoritative stop: settle travel gold first, then park at (x,y). */
 export async function stopTravel(
   db: Db,
   playerId: number,
   x: number,
   y: number,
+  reason: StopReason = "manual",
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const player = await db.query.players.findFirst({
     where: eq(players.id, playerId),
   });
   if (!player) return { ok: false, error: "Player not found" };
 
+  // Award +1 gold per time-elapsed step before clearing the job
+  await settleTravel(db, playerId);
+
   const mapId = player.currentMapId ?? DEFAULT_MAP_ID;
   const pos = clampToMap(x, y);
-  await db.delete(travelJobs).where(eq(travelJobs.playerId, playerId));
+
+  const job = await db.query.travelJobs.findFirst({
+    where: eq(travelJobs.playerId, playerId),
+  });
+
+  let extraGold = 0;
+  let pathFrom: Point | undefined;
+  let pathTo: Point | undefined;
+  if (job) {
+    const path = JSON.parse(job.pathJson) as Point[];
+    pathFrom = path[0];
+    pathTo = path[path.length - 1];
+    let stopIdx = -1;
+    for (let i = job.pathIndex; i < path.length; i++) {
+      const cell = path[i]!;
+      if (cell.x === pos.x && cell.y === pos.y) {
+        stopIdx = i;
+        break;
+      }
+    }
+    if (stopIdx >= 0) {
+      extraGold = Math.max(0, stopIdx - job.pathIndex);
+    }
+    await db.delete(travelJobs).where(eq(travelJobs.id, job.id));
+  }
+
   await db
     .update(players)
-    .set({ x: pos.x, y: pos.y, status: "idle" })
+    .set({
+      x: pos.x,
+      y: pos.y,
+      status: "idle",
+      ...(extraGold > 0
+        ? { gold: sql`${players.gold} + ${extraGold}` }
+        : {}),
+    })
     .where(eq(players.id, playerId));
   await markExploredCells(db, playerId, cellsInVision(pos.x, pos.y), mapId);
+
+  // If settleTravel already finished the path, it logged arrive — skip here.
+  if (job) {
+    const endPayload = { at: pos, from: pathFrom, to: pathTo };
+    if (reason === "arrived") {
+      await logTravelArrive(db, playerId, mapId, endPayload);
+    } else {
+      await logTravelStop(db, playerId, mapId, endPayload);
+    }
+  }
 
   return { ok: true };
 }

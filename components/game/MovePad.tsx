@@ -49,7 +49,7 @@ export function MovePad({
     if ((dx === 0 && dy === 0) || locked) return;
     const n = Number(steps);
     if (!Number.isFinite(n) || n < 1 || n > MAX_TRAVEL_STEPS) {
-      setStepsError(`步数须为 1–${MAX_TRAVEL_STEPS}`);
+      setStepsError(`Steps must be 1–${MAX_TRAVEL_STEPS}`);
       return;
     }
     setStepsError("");
@@ -94,7 +94,7 @@ export function MovePad({
             onClick={onStop}
             className="w-full rounded-lg border border-stone-300 bg-white py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50"
           >
-            终止
+            Stop
           </button>
         </div>
       ) : null}
@@ -119,7 +119,7 @@ export function MovePad({
                     ? "border-rose-400"
                     : "border-stone-300"
                 }`}
-                aria-label="移动格数"
+                aria-label="Travel steps"
               />
             );
           }
@@ -138,7 +138,7 @@ export function MovePad({
                   ? "border-pink-500 bg-pink-100 text-pink-700"
                   : "border-stone-200 bg-stone-50 text-stone-700 hover:bg-stone-100"
               }`}
-              aria-label={`方向 ${d.label}`}
+              aria-label={`Direction ${d.label}`}
             >
               {d.label}
             </button>

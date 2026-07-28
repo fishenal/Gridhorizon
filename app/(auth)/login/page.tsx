@@ -23,7 +23,7 @@ export default function LoginPage() {
     });
     setLoading(false);
     if (res?.error) {
-      setError("登录失败，请检查用户名或密码");
+      setError("Login failed. Check your username or password.");
       return;
     }
     router.push("/play");
@@ -34,12 +34,12 @@ export default function LoginPage() {
     <main className="mx-auto flex min-h-full w-full max-w-md flex-col justify-center gap-6 px-6 py-16">
       <div>
         <p className="text-sm tracking-wide text-teal-700">Gridhorizon</p>
-        <h1 className="mt-1 text-3xl font-semibold text-stone-900">登录</h1>
-        <p className="mt-2 text-stone-600">继续你的远征。</p>
+        <h1 className="mt-1 text-3xl font-semibold text-stone-900">Log in</h1>
+        <p className="mt-2 text-stone-600">Continue your expedition.</p>
       </div>
       <form onSubmit={onSubmit} className="flex flex-col gap-4">
         <label className="flex flex-col gap-1 text-sm">
-          玩家名
+          Player name
           <input
             className="rounded border border-stone-300 bg-white px-3 py-2"
             value={name}
@@ -49,7 +49,7 @@ export default function LoginPage() {
           />
         </label>
         <label className="flex flex-col gap-1 text-sm">
-          密码
+          Password
           <input
             type="password"
             className="rounded border border-stone-300 bg-white px-3 py-2"
@@ -65,13 +65,13 @@ export default function LoginPage() {
           disabled={loading}
           className="rounded bg-teal-800 px-4 py-2.5 text-white hover:bg-teal-700 disabled:opacity-60"
         >
-          {loading ? "登录中…" : "登录"}
+          {loading ? "Logging in…" : "Log in"}
         </button>
       </form>
       <p className="text-sm text-stone-600">
-        还没有账号？{" "}
+        Don&apos;t have an account?{" "}
         <Link href="/register" className="text-teal-800 underline">
-          注册
+          Register
         </Link>
       </p>
     </main>

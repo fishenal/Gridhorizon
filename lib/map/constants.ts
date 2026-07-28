@@ -13,6 +13,8 @@ export const MAX_TRAVEL_STEPS = 1000;
 export const WORLD_SEED = Number(process.env.WORLD_SEED ?? "424242");
 
 export const WAYPOINT_COST = 100;
+/** Alias: flag build cost (same as legacy waypoint). */
+export const FLAG_COST = WAYPOINT_COST;
 export const WAYPOINT_TOLL = 10;
 export const MINE_COST = 500;
 

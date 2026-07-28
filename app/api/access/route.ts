@@ -15,7 +15,7 @@ export async function POST(req: Request) {
   }
 
   if (code !== expectedAccessCode()) {
-    return NextResponse.json({ error: "访问码不正确" }, { status: 401 });
+    return NextResponse.json({ error: "Incorrect access code" }, { status: 401 });
   }
 
   const res = NextResponse.json({ ok: true });
