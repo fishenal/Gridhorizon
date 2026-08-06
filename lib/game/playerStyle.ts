@@ -1,5 +1,12 @@
-/** Flag influence Chebyshev radius: 2 → 5×5 centered on the flag. */
-export const FLAG_RANGE_RADIUS = 2;
+/**
+ * Structure influence: user-facing 10×10 zone.
+ * Chebyshev radius 5 → cells with max(|dx|,|dy|) <= 5 (11×11 grid cells;
+ * labeled 10×10 as the design size).
+ */
+export const FLAG_RANGE_RADIUS = 5;
+
+/** User-facing influence size. */
+export const STRUCTURE_INFLUENCE_SIDE = 10;
 
 export const DEFAULT_PLAYER_EMOJI = "🙂";
 
@@ -33,11 +40,11 @@ const BUILDING_EMOJI: Record<string, string> = {
   fishery: "🎣",
 };
 
-/** Neutral tint for flag influence (no per-player colors). */
+/** Neutral tint for structure influence overlay (hover only). */
 export const FLAG_RANGE_TINT = "#e879a9";
 
-export function flagRangeHalf(): number {
-  return FLAG_RANGE_RADIUS;
+export function influenceSide(_radius: number = FLAG_RANGE_RADIUS): number {
+  return STRUCTURE_INFLUENCE_SIDE;
 }
 
 export function buildingEmoji(type: string): string {

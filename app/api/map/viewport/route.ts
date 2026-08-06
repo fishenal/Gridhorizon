@@ -175,7 +175,9 @@ export async function GET(req: Request) {
                 createdAt: b.createdAt.toISOString(),
                 tollRadius:
                   b.tollRadius ??
-                  (b.type === "flag" || b.type === "waypoint"
+                  (b.type === "flag" ||
+                  b.type === "waypoint" ||
+                  b.type === "town"
                     ? FLAG_RANGE_RADIUS
                     : null),
               }

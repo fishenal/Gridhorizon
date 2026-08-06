@@ -1,8 +1,8 @@
 "use client";
 
 import { signOut } from "next-auth/react";
+import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Hud } from "@/components/game/Hud";
 import {
   MapCanvas,
   type ScreenAnchors,
@@ -11,6 +11,12 @@ import {
 } from "@/components/game/MapCanvas";
 import { MovePad, type TravelProgress } from "@/components/game/MovePad";
 import { Minimap } from "@/components/game/Minimap";
+import { OnlinePlayers } from "@/components/game/OnlinePlayers";
+import { PlayerStatusPanel } from "@/components/game/PlayerStatusPanel";
+import {
+  PlayerProfileModal,
+  type PlayerProfileTarget,
+} from "@/components/game/PlayerProfileModal";
 import { UserCard, FlagCard, TownCard, BuildNameDialog, type BuildKind } from "@/components/game/UserCard";
 import { MapPointPopup } from "@/components/game/MapPointPopup";
 import { generateTile } from "@/lib/map/generator";
@@ -32,7 +38,18 @@ import {
   rebuildLocalViewportTiles,
   type TileOverlay,
 } from "@/lib/map/localFog";
-import { VISION_RADIUS, WORLD_SEED } from "@/lib/map/constants";
+import { VISION_RADIUS, WORLD_SEED, WAYPOINT_TOLL, XP_BUILD, XP_PER_STEP } from "@/lib/map/constants";
+import {
+  isSpacedStructureType,
+  isTooCloseToAnyStructure,
+  STRUCTURE_TOO_CLOSE_MSG,
+} from "@/lib/game/structureSpacing";
+import {
+  defaultTollRadius,
+  findTollEntries,
+  type TollStructure,
+} from "@/lib/game/structureToll";
+import { xpForToll } from "@/lib/game/xp";
 
 type MeResponse = {
   player: {
@@ -111,6 +128,8 @@ export default function PlayClient() {
   const [busy, setBusy] = useState(false);
   const [traveling, setTraveling] = useState(false);
   const [pendingBuild, setPendingBuild] = useState<BuildKind | null>(null);
+  const [profileTarget, setProfileTarget] =
+    useState<PlayerProfileTarget | null>(null);
   const [travelProgress, setTravelProgress] = useState<TravelProgress | null>(
     null,
   );
@@ -135,6 +154,7 @@ export default function PlayClient() {
   >(() => {});
   const displayPosRef = useRef<Point | null>(null);
   const playerIdRef = useRef<number | null>(null);
+  const goldRef = useRef(0);
   const exploredRef = useRef<Set<string>>(new Set());
   const overlaysRef = useRef<Map<string, TileOverlay>>(new Map());
   const worldSeedRef = useRef(WORLD_SEED);
@@ -222,6 +242,127 @@ export default function PlayClient() {
       overlays: overlaysRef.current,
     });
   }, []);
+
+  /** Client-side spacing check against known map overlays (server still authoritative). */
+  const localTooCloseToStructure = useCallback((x: number, y: number) => {
+    const nearby: Point[] = [];
+    for (const [key, overlay] of overlaysRef.current) {
+      const b = overlay.building;
+      if (!b || !isSpacedStructureType(b.type)) continue;
+      const comma = key.indexOf(",");
+      if (comma < 0) continue;
+      const sx = Number(key.slice(0, comma));
+      const sy = Number(key.slice(comma + 1));
+      if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+      nearby.push({ x: sx, y: sy });
+    }
+    return isTooCloseToAnyStructure(x, y, nearby);
+  }, []);
+
+  const trySelectBuild = useCallback(
+    (kind: BuildKind) => {
+      if (!me || travelingRef.current) return;
+      // UserCard already shows the live too-close hint; don't sticky-banner it.
+      if (localTooCloseToStructure(me.player.x, me.player.y)) return;
+      setError("");
+      setPendingBuild(kind);
+    },
+    [localTooCloseToStructure, me],
+  );
+
+  /** Known flag/town/waypoint overlays for local toll preview. */
+  const collectLocalTollStructures = useCallback((): TollStructure[] => {
+    const out: TollStructure[] = [];
+    for (const [key, overlay] of overlaysRef.current) {
+      const b = overlay.building;
+      if (!b || !isSpacedStructureType(b.type) || b.id <= 0) continue;
+      const comma = key.indexOf(",");
+      if (comma < 0) continue;
+      const sx = Number(key.slice(0, comma));
+      const sy = Number(key.slice(comma + 1));
+      if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+      out.push({
+        id: b.id,
+        x: sx,
+        y: sy,
+        radius: defaultTollRadius(b.tollRadius),
+        ownerId: b.ownerId,
+        type: b.type,
+        name: b.name ?? null,
+        amount: WAYPOINT_TOLL,
+        ownerName: b.ownerName,
+      });
+    }
+    return out;
+  }, []);
+
+  /** Instant gold + settle journal when stepping into influence. */
+  const applyLocalTollEntries = useCallback(
+    (previous: Point, next: Point) => {
+      const travelerId = playerIdRef.current;
+      if (!travelerId) return;
+      const entries = findTollEntries(
+        previous,
+        [next],
+        collectLocalTollStructures(),
+        travelerId,
+      );
+      if (entries.length === 0) return;
+
+      // Optimistic gold + XP only — log comes from server after settle.
+      let gold = goldRef.current;
+      let tollXp = 0;
+      for (const { structure: b } of entries) {
+        if (b.amount <= 0 || gold < b.amount) break;
+        gold -= b.amount;
+        tollXp += xpForToll(b.amount);
+      }
+      if (gold === goldRef.current && tollXp === 0) return;
+
+      goldRef.current = gold;
+      setMe((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          player: {
+            ...prev.player,
+            gold,
+            xp: prev.player.xp + tollXp,
+          },
+        };
+      });
+
+      // Settle path on server now so toll_paid / toll_received land immediately.
+      void (async () => {
+        try {
+          const res = await fetch("/api/me");
+          if (!res.ok) return;
+          const data = await readJson<MeResponse>(res);
+          if (data?.player && typeof data.player.gold === "number") {
+            goldRef.current = data.player.gold;
+            setMe((prev) => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                player: {
+                  ...prev.player,
+                  gold: data.player.gold,
+                  xp:
+                    typeof data.player.xp === "number"
+                      ? data.player.xp
+                      : prev.player.xp,
+                },
+              };
+            });
+          }
+          setJournalTick((t) => t + 1);
+        } catch {
+          // soft — stop/arrive settle will catch up
+        }
+      })();
+    },
+    [collectLocalTollStructures],
+  );
 
   const syncExploredAt = useCallback(
     async (pos: Point) => {
@@ -348,10 +489,16 @@ export default function PlayClient() {
         if (prev.id !== playerIdRef.current) return prev;
         return { ...prev, x: pos.x, y: pos.y };
       });
+      // Drop sticky spacing banner once the player leaves the blocked zone.
+      if (!localTooCloseToStructure(pos.x, pos.y)) {
+        setError((prev) =>
+          prev === STRUCTURE_TOO_CLOSE_MSG ? "" : prev,
+        );
+      }
       setExploredRevision((n) => n + 1);
       void syncExploredAt(pos);
     },
-    [rebuildFogAt, syncExploredAt],
+    [rebuildFogAt, syncExploredAt, localTooCloseToStructure],
   );
 
   const updateTravelProgress = useCallback((index: number, pathLen: number) => {
@@ -435,7 +582,7 @@ export default function PlayClient() {
       const meRes = await fetch("/api/me");
       if (seq !== refreshSeqRef.current) return;
       if (meRes.status === 401) {
-        window.location.href = "/login";
+        window.location.href = "/";
         return;
       }
       if (!meRes.ok) return;
@@ -444,6 +591,7 @@ export default function PlayClient() {
       if (seq !== refreshSeqRef.current) return;
 
       playerIdRef.current = meData.player.id;
+      goldRef.current = meData.player.gold;
       worldSeedRef.current = meData.config.worldSeed ?? worldSeedRef.current;
       visionRadiusRef.current =
         meData.config.visionRadius ?? visionRadiusRef.current;
@@ -647,15 +795,24 @@ export default function PlayClient() {
         return;
       }
       travelIndexRef.current = next;
-      // +1 gold per step (server confirms on settle/stop)
+      // +1 gold and XP per step (server confirms on settle/stop)
+      goldRef.current += 1;
       setMe((prev) => {
         if (!prev) return prev;
         return {
           ...prev,
-          player: { ...prev.player, gold: prev.player.gold + 1 },
+          player: {
+            ...prev.player,
+            gold: prev.player.gold + 1,
+            xp: prev.player.xp + XP_PER_STEP,
+          },
         };
       });
       const pos = p[next]!;
+      const prevPos = p[next - 1];
+      if (prevPos) {
+        applyLocalTollEntries(prevPos, pos);
+      }
       updateTravelProgress(next, p.length);
       if (next >= p.length - 1) {
         finishLocalTravel(pos);
@@ -791,6 +948,10 @@ export default function PlayClient() {
     if (!me || travelingRef.current) return;
     const x = me.player.x;
     const y = me.player.y;
+    if (localTooCloseToStructure(x, y)) {
+      setPendingBuild(null);
+      return;
+    }
     setBusy(true);
     setError("");
     const buildLogId = pushLocalLog("build", {
@@ -812,7 +973,17 @@ export default function PlayClient() {
         return;
       }
       setPendingBuild(null);
-      // Optimistic map marker before softRefresh returns
+      // Optimistic map marker + XP before softRefresh returns
+      setMe((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          player: {
+            ...prev.player,
+            xp: prev.player.xp + XP_BUILD,
+          },
+        };
+      });
       overlaysRef.current.set(`${x},${y}`, {
         building: {
           id: -1,
@@ -824,7 +995,8 @@ export default function PlayClient() {
           name,
           message: name,
           createdAt: new Date().toISOString(),
-          tollRadius: kind === "flag" ? FLAG_RANGE_RADIUS : null,
+          tollRadius:
+            kind === "flag" || kind === "town" ? FLAG_RANGE_RADIUS : null,
         },
         claim: overlaysRef.current.get(`${x},${y}`)?.claim ?? null,
       });
@@ -878,8 +1050,19 @@ export default function PlayClient() {
 
   if (!me || !viewport) {
     return (
-      <main className="flex h-dvh items-center justify-center bg-white text-stone-600">
-        Loading world…
+      <main className="relative flex h-dvh items-center justify-center overflow-hidden text-stone-100">
+        <div aria-hidden className="pointer-events-none absolute inset-0">
+          <Image
+            src="/home-ocean-horizon.png"
+            alt=""
+            fill
+            priority
+            sizes="100vw"
+            className="object-cover object-center"
+          />
+          <div className="absolute inset-0 bg-stone-950/50" />
+        </div>
+        <p className="relative z-10">Loading world…</p>
       </main>
     );
   }
@@ -902,6 +1085,10 @@ export default function PlayClient() {
       selection.id === me.player.id &&
       overlaysRef.current.get(selfTileKey)?.building,
   );
+  const selfTooClose =
+    selection?.type === "player" &&
+    selection.id === me.player.id &&
+    localTooCloseToStructure(me.player.x, me.player.y);
 
   const popupAnchor = (() => {
     if (!selection || !anchors.entity) return null;
@@ -916,13 +1103,21 @@ export default function PlayClient() {
   })();
 
   return (
-    <main className="relative flex h-dvh flex-col overflow-hidden bg-white">
-      <Hud
-        player={me.player}
-        onSignOut={() => signOut({ callbackUrl: "/" })}
-      />
+    <main className="relative flex h-dvh flex-col overflow-hidden">
+      <div aria-hidden className="pointer-events-none absolute inset-0 z-0">
+        <Image
+          src="/home-ocean-horizon.png"
+          alt=""
+          fill
+          priority
+          sizes="100vw"
+          className="object-cover object-center"
+        />
+        <div className="absolute inset-0 bg-stone-950/35" />
+      </div>
+      <div className="relative z-10 flex min-h-0 flex-1 flex-col">
       {error ? (
-        <p className="shrink-0 bg-red-50 px-3 py-1 text-xs text-red-700">
+        <p className="pointer-events-none absolute left-1/2 top-3 z-30 -translate-x-1/2 rounded-lg bg-red-50/95 px-3 py-1 text-xs text-red-700 shadow">
           {error}
         </p>
       ) : null}
@@ -936,21 +1131,51 @@ export default function PlayClient() {
           viewRadius={viewRadiusForZoom(mapZoomLevel, viewport.visionRadius)}
           selectedPoint={selection}
           onPointSelect={onPointSelect}
+          onPlayerClick={(p) =>
+            setProfileTarget({
+              id: p.id,
+              name: p.name,
+              emoji: p.emoji,
+              x: p.x,
+              y: p.y,
+            })
+          }
           onAnchorsChange={onAnchorsChange}
         />
 
         <div className="pointer-events-none absolute inset-0 z-10">
-          <div className="absolute left-4 top-4 z-20">
-            <Minimap
-              exploredRef={exploredRef}
-              exploredRevision={exploredRevision}
-              seed={me.config.worldSeed ?? WORLD_SEED}
-              player={{ x: me.player.x, y: me.player.y }}
-              viewCenter={viewport.center}
-              viewRadius={viewRadiusForZoom(
-                mapZoomLevel,
-                viewport.visionRadius,
-              )}
+          <div className="absolute left-4 top-4 z-20 flex flex-col items-stretch gap-2">
+            <PlayerStatusPanel
+              player={{
+                name: me.player.name,
+                emoji: me.player.emoji,
+                gold: me.player.gold,
+                xp: me.player.xp,
+                x: me.player.x,
+                y: me.player.y,
+                status: me.player.status,
+              }}
+              refreshToken={journalTick}
+              onSignOut={() => signOut({ callbackUrl: "/" })}
+            />
+            <OnlinePlayers
+              refreshToken={journalTick}
+              self={{
+                id: me.player.id,
+                name: me.player.name,
+                emoji: me.player.emoji,
+                x: me.player.x,
+                y: me.player.y,
+              }}
+              onPlayerClick={(p) =>
+                setProfileTarget({
+                  id: p.id,
+                  name: p.name,
+                  emoji: p.emoji,
+                  x: p.x,
+                  y: p.y,
+                })
+              }
             />
           </div>
 
@@ -993,11 +1218,10 @@ export default function PlayClient() {
                   y={selection.y}
                   terrain={selfTerrain?.terrain}
                   tileOccupied={selfOccupied}
+                  tooCloseToStructure={Boolean(selfTooClose)}
                   busy={busy || traveling}
                   onBuildSelect={
-                    selection.id === me.player.id
-                      ? (kind) => setPendingBuild(kind)
-                      : undefined
+                    selection.id === me.player.id ? trySelectBuild : undefined
                   }
                   onEmojiChange={
                     selection.id === me.player.id
@@ -1009,7 +1233,18 @@ export default function PlayClient() {
             </MapPointPopup>
           ) : null}
 
-          <div className="absolute bottom-4 left-4 z-20">
+          <div className="absolute bottom-4 left-4 z-20 flex flex-col items-start gap-2">
+            <Minimap
+              exploredRef={exploredRef}
+              exploredRevision={exploredRevision}
+              seed={me.config.worldSeed ?? WORLD_SEED}
+              player={{ x: me.player.x, y: me.player.y }}
+              viewCenter={viewport.center}
+              viewRadius={viewRadiusForZoom(
+                mapZoomLevel,
+                viewport.visionRadius,
+              )}
+            />
             <ZoomSlider
               zoomLevel={mapZoomLevel}
               visionRadius={viewport.visionRadius}
@@ -1028,6 +1263,7 @@ export default function PlayClient() {
           </div>
         </div>
       </div>
+      </div>
 
       {pendingBuild ? (
         <BuildNameDialog
@@ -1035,6 +1271,13 @@ export default function PlayClient() {
           busy={busy}
           onCancel={() => setPendingBuild(null)}
           onConfirm={(name) => void onConfirmBuild(pendingBuild, name)}
+        />
+      ) : null}
+
+      {profileTarget ? (
+        <PlayerProfileModal
+          target={profileTarget}
+          onClose={() => setProfileTarget(null)}
         />
       ) : null}
     </main>

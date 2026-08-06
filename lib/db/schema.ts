@@ -45,6 +45,10 @@ export const players = pgTable("players", {
   economySettledAt: timestamp("economy_settled_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
+  /** Touched on authenticated activity; used for online presence. */
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -116,7 +120,7 @@ export const buildings = pgTable(
     /** Display name for flag / town */
     name: text("name"),
     message: text("message"),
-    /** Future nearby toll (not charged yet) */
+    /** Influence radius for toll (Chebyshev); charged when travelers enter range */
     tollRadius: integer("toll_radius"),
     tollAmount: integer("toll_amount"),
     createdAt: timestamp("created_at", { withTimezone: true })

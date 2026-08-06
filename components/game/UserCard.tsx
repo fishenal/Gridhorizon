@@ -6,6 +6,7 @@ import { FLAG_COST } from "@/lib/map/constants";
 import {
   AVATAR_EMOJI_CHOICES,
   FLAG_RANGE_RADIUS,
+  influenceSide,
   normalizePlayerEmoji,
 } from "@/lib/game/playerStyle";
 import type { SelectedFlag, SelectedTown } from "@/components/game/MapCanvas";
@@ -23,6 +24,8 @@ type Props = {
   isSelf: boolean;
   terrain?: Terrain;
   tileOccupied?: boolean;
+  /** True when a known flag/town is within the 20×20 spacing rule */
+  tooCloseToStructure?: boolean;
   busy?: boolean;
   onBuildSelect?: (kind: BuildKind) => void;
   onEmojiChange?: (emoji: string) => void;
@@ -62,6 +65,7 @@ export function UserCard({
   isSelf,
   terrain,
   tileOccupied,
+  tooCloseToStructure,
   busy,
   onBuildSelect,
   onEmojiChange,
@@ -112,11 +116,20 @@ export function UserCard({
           ) : options.length > 0 ? (
             <div className="mt-1 space-y-1.5 border-t border-stone-100 pt-2">
               <p className="text-[11px] text-stone-500">Build</p>
+              {tooCloseToStructure ? (
+                <p className="text-[11px] text-red-600">
+                  Too close to another flag or town (need 20×20 clear)
+                </p>
+              ) : (
+                <p className="text-[10px] text-stone-400">
+                  One flag/town per 20×20 area
+                </p>
+              )}
               {options.map((kind) => (
                 <button
                   key={kind}
                   type="button"
-                  disabled={busy}
+                  disabled={busy || tooCloseToStructure}
                   onClick={() => onBuildSelect?.(kind)}
                   className="w-full rounded-lg border border-pink-300 bg-white px-2 py-1.5 text-sm text-pink-700 hover:bg-pink-100 disabled:opacity-40"
                 >
@@ -151,7 +164,7 @@ function formatCreatedAt(iso: string | null) {
 }
 
 export function FlagCard({ flag }: FlagCardProps) {
-  const side = (flag.tollRadius ?? FLAG_RANGE_RADIUS) * 2 + 1;
+  const side = influenceSide(flag.tollRadius ?? FLAG_RANGE_RADIUS);
   const ownerEmoji = normalizePlayerEmoji(flag.ownerEmoji);
   return (
     <div className="pointer-events-auto w-48 rounded-xl border border-stone-200 bg-white/95 p-3 shadow-lg backdrop-blur">
@@ -189,6 +202,7 @@ type TownCardProps = {
 
 export function TownCard({ town }: TownCardProps) {
   const ownerEmoji = normalizePlayerEmoji(town.ownerEmoji);
+  const side = influenceSide(town.tollRadius ?? FLAG_RANGE_RADIUS);
   return (
     <div className="pointer-events-auto w-48 rounded-xl border border-stone-200 bg-white/95 p-3 shadow-lg backdrop-blur">
       <div className="mb-2 flex min-w-0 items-center gap-2">
@@ -212,6 +226,9 @@ export function TownCard({ town }: TownCardProps) {
       <p className="text-sm text-pink-600">Level: {town.level}</p>
       <p className="text-sm text-pink-600">
         Created: {formatCreatedAt(town.createdAt)}
+      </p>
+      <p className="mt-1 text-[11px] text-stone-500">
+        Influence {side}×{side} (centered on town)
       </p>
     </div>
   );

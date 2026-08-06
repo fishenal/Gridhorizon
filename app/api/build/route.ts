@@ -8,6 +8,11 @@ import { settlePlayer } from "@/lib/game/settle";
 import { logBuild } from "@/lib/game/activityLog";
 import { FLAG_COST, MINE_COST } from "@/lib/map/constants";
 import { FLAG_RANGE_RADIUS } from "@/lib/game/playerStyle";
+import {
+  hasNearbyStructure,
+  STRUCTURE_TOO_CLOSE_MSG,
+} from "@/lib/game/structureSpacing";
+import { addXp, XP_BUILD } from "@/lib/game/xp";
 import { generateTile, hasWaterNeighbor } from "@/lib/map/generator";
 import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
 
@@ -89,6 +94,12 @@ export async function POST(req: Request) {
     if (existingBuilding) {
       return NextResponse.json({ error: "Tile occupied" }, { status: 400 });
     }
+    if (await hasNearbyStructure(db, mapId, x, y)) {
+      return NextResponse.json(
+        { error: STRUCTURE_TOO_CLOSE_MSG },
+        { status: 400 },
+      );
+    }
     if (player.gold < FLAG_COST) {
       return NextResponse.json({ error: "Need 100 gold" }, { status: 400 });
     }
@@ -109,6 +120,7 @@ export async function POST(req: Request) {
         tollRadius: FLAG_RANGE_RADIUS,
       })
       .returning({ id: buildings.id });
+    await addXp(db, playerId, XP_BUILD);
     await logBuild(db, playerId, mapId, {
       buildingType: "flag",
       name: flagName,
@@ -136,6 +148,12 @@ export async function POST(req: Request) {
     if (existingBuilding) {
       return NextResponse.json({ error: "Tile occupied" }, { status: 400 });
     }
+    if (await hasNearbyStructure(db, mapId, x, y)) {
+      return NextResponse.json(
+        { error: STRUCTURE_TOO_CLOSE_MSG },
+        { status: 400 },
+      );
+    }
     const [row] = await db
       .insert(buildings)
       .values({
@@ -146,8 +164,10 @@ export async function POST(req: Request) {
         type: "town",
         name: townName,
         message: townName,
+        tollRadius: FLAG_RANGE_RADIUS,
       })
       .returning({ id: buildings.id });
+    await addXp(db, playerId, XP_BUILD);
     await logBuild(db, playerId, mapId, {
       buildingType: "town",
       name: townName,
@@ -206,6 +226,7 @@ export async function POST(req: Request) {
         type: "mine",
       })
       .returning({ id: buildings.id });
+    await addXp(db, playerId, XP_BUILD);
     await logBuild(db, playerId, mapId, {
       buildingType: "mine",
       name: null,
@@ -239,6 +260,7 @@ export async function POST(req: Request) {
         type: "farm",
       })
       .returning({ id: buildings.id });
+    await addXp(db, playerId, XP_BUILD);
     await logBuild(db, playerId, mapId, {
       buildingType: "farm",
       name: null,
@@ -269,6 +291,7 @@ export async function POST(req: Request) {
         type: "fishery",
       })
       .returning({ id: buildings.id });
+    await addXp(db, playerId, XP_BUILD);
     await logBuild(db, playerId, mapId, {
       buildingType: "fishery",
       name: null,

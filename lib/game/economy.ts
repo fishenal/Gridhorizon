@@ -3,11 +3,8 @@ import type { Db } from "@/lib/db";
 import { buildings, players, type Building } from "@/lib/db/schema";
 import {
   ECONOMY_CYCLE_SECONDS,
-  FARM_BASE_FOOD,
-  FISHERY_BASE_FOOD,
   MINE_GOLD_RATES,
   TOWN_BASE_GOLD,
-  TOWN_CONSUME_PER_TILE,
 } from "@/lib/map/constants";
 import { generateTile } from "@/lib/map/generator";
 import { getPlayerWorld } from "@/lib/map/world";
@@ -51,6 +48,10 @@ function townClusterGold(n: number): number {
   return TOWN_BASE_GOLD * n + (n - 1);
 }
 
+/**
+ * Gold-only economy for now.
+ * stone/wood/ore/food columns remain in DB but are not produced or consumed.
+ */
 export async function settleEconomy(db: Db, playerId: number): Promise<void> {
   const player = await db.query.players.findFirst({
     where: eq(players.id, playerId),
@@ -73,51 +74,30 @@ export async function settleEconomy(db: Db, playerId: number): Promise<void> {
   });
 
   let gold = player.gold;
-  let stone = player.stone;
-  let wood = player.wood;
-  let ore = player.ore;
-  let food = player.food;
 
-  const farms = owned.filter((b) => b.type === "farm");
   const towns = owned.filter((b) => b.type === "town");
   const mines = owned.filter((b) => b.type === "mine");
-  const fisheries = owned.filter((b) => b.type === "fishery");
 
   for (let c = 0; c < cycles; c++) {
-    // Mines → gold from resource type
+    // Mines → gold from tile resource type
     for (const m of mines) {
       const tile = generateTile(m.x, m.y, world.seed);
       if (tile.resourceType === "none") continue;
       gold += MINE_GOLD_RATES[tile.resourceType];
     }
 
-    // Farms → food with adjacency bonus
-    for (const f of farms) {
-      const n = clusterSize(farms, f);
-      const mult = 1 + 0.1 * (n - 1);
-      food += Math.floor(FARM_BASE_FOOD * mult);
-    }
-
-    // Fisheries
-    for (const _ of fisheries) {
-      food += FISHERY_BASE_FOOD;
-    }
-
-    // Towns: consume then produce (per-tile accounting via clusters once)
+    // Towns → gold (no resource consumption while resources are paused)
     const townVisited = new Set<string>();
     for (const t of towns) {
       const k = `${t.x},${t.y}`;
       if (townVisited.has(k)) continue;
       const n = clusterSize(towns, t);
-      // mark cluster
       const stack = [t];
-      const cluster: Building[] = [];
       while (stack.length) {
         const cur = stack.pop()!;
         const ck = `${cur.x},${cur.y}`;
         if (townVisited.has(ck)) continue;
         townVisited.add(ck);
-        cluster.push(cur);
         for (const [dx, dy] of [
           [1, 0],
           [-1, 0],
@@ -130,23 +110,7 @@ export async function settleEconomy(db: Db, playerId: number): Promise<void> {
           if (next && !townVisited.has(`${next.x},${next.y}`)) stack.push(next);
         }
       }
-
-      const needStone = TOWN_CONSUME_PER_TILE.stone * n;
-      const needWood = TOWN_CONSUME_PER_TILE.wood * n;
-      const needOre = TOWN_CONSUME_PER_TILE.ore * n;
-      const needFood = TOWN_CONSUME_PER_TILE.food * n;
-      if (
-        stone >= needStone &&
-        wood >= needWood &&
-        ore >= needOre &&
-        food >= needFood
-      ) {
-        stone -= needStone;
-        wood -= needWood;
-        ore -= needOre;
-        food -= needFood;
-        gold += townClusterGold(n);
-      }
+      gold += townClusterGold(n);
     }
   }
 
@@ -158,10 +122,6 @@ export async function settleEconomy(db: Db, playerId: number): Promise<void> {
     .update(players)
     .set({
       gold,
-      stone,
-      wood,
-      ore,
-      food,
       economySettledAt: settledAt,
     })
     .where(eq(players.id, playerId));

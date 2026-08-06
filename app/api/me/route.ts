@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 import { players, travelJobs } from "@/lib/db/schema";
 import { settlePlayer } from "@/lib/game/settle";
+import { touchLastSeen } from "@/lib/game/presence";
 import { TRAVEL_SECONDS_PER_TILE, VISION_RADIUS } from "@/lib/map/constants";
 import { listFriends } from "@/lib/game/social";
 import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
@@ -19,6 +20,7 @@ export async function GET() {
     const db = getDb();
     await ensureDefaultMap(db);
     await settlePlayer(db, playerId);
+    await touchLastSeen(db, playerId);
 
     const player = await db.query.players.findFirst({
       where: eq(players.id, playerId),

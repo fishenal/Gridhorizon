@@ -12,6 +12,7 @@ import {
   displayUnitEmoji,
   FLAG_RANGE_RADIUS,
   FLAG_RANGE_TINT,
+  influenceSide,
   normalizePlayerEmoji,
 } from "@/lib/game/playerStyle";
 
@@ -82,6 +83,7 @@ export type SelectedTown = {
   ownerEmoji: string;
   createdAt: string | null;
   level: number;
+  tollRadius: number;
 };
 
 export type SelectedEntity = SelectedPlayer | SelectedFlag | SelectedTown;
@@ -111,6 +113,8 @@ type Props = {
   selectedPoint: SelectedEntity | null;
   /** Hover a grid special → open; leave → delayed clear. */
   onPointSelect: (point: SelectedEntity | null) => void;
+  /** Click another player avatar to open profile modal. */
+  onPlayerClick?: (player: SelectedPlayer) => void;
   onAnchorsChange: (anchors: ScreenAnchors) => void;
 };
 
@@ -163,7 +167,12 @@ function buildingLabel(
       } as Record<string, string>
     )[b.type] ?? b.type;
   const name = b.name || b.message;
-  return name ? `${kind} "${name}"` : kind;
+  const base = name ? `${kind} "${name}"` : kind;
+  if (isFlagType(b.type) || isTownType(b.type)) {
+    const side = influenceSide(b.tollRadius ?? FLAG_RANGE_RADIUS);
+    return `${base} · Influence ${side}×${side}`;
+  }
+  return base;
 }
 
 const AXIS_LEFT = 52;
@@ -178,6 +187,7 @@ export function MapCanvas({
   viewRadius,
   selectedPoint,
   onPointSelect,
+  onPlayerClick,
   onAnchorsChange,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -300,36 +310,19 @@ export function MapCanvas({
     ];
   }, [player, others]);
 
-  const flagsInView = useMemo(() => {
-    const list: Array<{
-      id: number;
-      x: number;
-      y: number;
-      radius: number;
-    }> = [];
-    for (const t of tiles) {
-      if (t.fog || !t.building || !isFlagType(t.building.type)) continue;
-      list.push({
-        id: t.building.id,
-        x: t.x,
-        y: t.y,
-        radius: t.building.tollRadius ?? FLAG_RANGE_RADIUS,
-      });
-    }
-    return list;
-  }, [tiles]);
-
-  const selectedFlag = useMemo(() => {
-    if (selectedPoint?.type !== "flag") return null;
-    return (
-      flagsInView.find((f) => f.id === selectedPoint.id) ?? {
-        id: selectedPoint.id,
+  /** Hover-only: tint cells around the selected flag or town. */
+  const influenceSource = useMemo(() => {
+    if (!selectedPoint) return null;
+    if (selectedPoint.type === "flag" || selectedPoint.type === "town") {
+      return {
         x: selectedPoint.x,
         y: selectedPoint.y,
-        radius: selectedPoint.tollRadius,
-      }
-    );
-  }, [flagsInView, selectedPoint]);
+        // Always use current global radius (old DB rows may still store 2)
+        radius: FLAG_RANGE_RADIUS,
+      };
+    }
+    return null;
+  }, [selectedPoint]);
 
   useLayoutEffect(() => {
     const wrap = wrapRef.current;
@@ -410,6 +403,7 @@ export function MapCanvas({
         ownerEmoji: normalizePlayerEmoji(b.ownerEmoji),
         createdAt: b.createdAt ?? null,
         level: b.level ?? 1,
+        tollRadius: b.tollRadius ?? FLAG_RANGE_RADIUS,
       };
     }
     return null;
@@ -424,12 +418,12 @@ export function MapCanvas({
     onPointSelect(null);
   }
 
-  const showTileTip = tileTip && selectedPoint == null;
+  const showTileTip = tileTip != null;
 
   return (
     <div
       ref={wrapRef}
-      className="relative flex h-full w-full min-h-0 items-center justify-center overflow-hidden bg-white"
+      className="relative flex h-full w-full min-h-0 items-center justify-center overflow-hidden bg-transparent"
     >
       <div
         ref={boardRef}
@@ -437,7 +431,7 @@ export function MapCanvas({
         style={{ width: boardW, height: boardH }}
       >
         <div
-          className="absolute text-center text-[10px] font-bold text-pink-600"
+          className="absolute text-center text-[10px] font-bold text-white"
           style={{ left: AXIS_LEFT, top: 0, width: mapW, height: AXIS_TOP }}
         >
           {xLabels.map(({ wx, gx }) => (
@@ -452,7 +446,7 @@ export function MapCanvas({
         </div>
 
         <div
-          className="absolute text-right text-[10px] font-bold text-pink-600"
+          className="absolute text-right text-[10px] font-bold text-white"
           style={{ left: 0, top: AXIS_TOP, width: AXIS_LEFT, height: mapH }}
         >
           {yLabels.map(({ wy, gy }) => (
@@ -488,28 +482,13 @@ export function MapCanvas({
               : `(${c.wx}, ${c.wy})`;
             const fontPx = Math.max(10, Math.min(cell * 0.78, 22));
 
-            let rangeStrong = false;
-            let inFlagRange = false;
-            if (selectedFlag) {
+            let inInfluence = false;
+            if (influenceSource) {
               const d = Math.max(
-                Math.abs(c.wx - selectedFlag.x),
-                Math.abs(c.wy - selectedFlag.y),
+                Math.abs(c.wx - influenceSource.x),
+                Math.abs(c.wy - influenceSource.y),
               );
-              if (d <= selectedFlag.radius) {
-                inFlagRange = true;
-                rangeStrong = true;
-              }
-            }
-            if (!inFlagRange) {
-              for (const f of flagsInView) {
-                const d = Math.max(
-                  Math.abs(c.wx - f.x),
-                  Math.abs(c.wy - f.y),
-                );
-                if (d > f.radius) continue;
-                inFlagRange = true;
-                break;
-              }
+              if (d <= influenceSource.radius) inInfluence = true;
             }
 
             const hasPlayer = [player, ...others].some(
@@ -538,15 +517,13 @@ export function MapCanvas({
                   if (isSpecial) handlePointLeave();
                 }}
               >
-                {inFlagRange ? (
+                {inInfluence ? (
                   <div
                     className="pointer-events-none absolute inset-0"
                     style={{
                       backgroundColor: FLAG_RANGE_TINT,
-                      opacity: rangeStrong ? 0.28 : 0.12,
-                      boxShadow: rangeStrong
-                        ? `inset 0 0 0 1px ${FLAG_RANGE_TINT}`
-                        : undefined,
+                      opacity: 0.32,
+                      boxShadow: `inset 0 0 0 1px ${FLAG_RANGE_TINT}`,
                     }}
                   />
                 ) : null}
@@ -603,6 +580,18 @@ export function MapCanvas({
                 type="button"
                 onMouseEnter={() => handlePointEnter(u.x, u.y)}
                 onMouseLeave={handlePointLeave}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (self || !onPlayerClick) return;
+                  onPlayerClick({
+                    type: "player",
+                    id: u.id,
+                    name: u.name,
+                    x: u.x,
+                    y: u.y,
+                    emoji: normalizePlayerEmoji(u.emoji),
+                  });
+                }}
                 className="pointer-events-auto absolute flex items-center justify-center bg-transparent"
                 style={{
                   left: gx * cell + cell / 2,
@@ -615,6 +604,7 @@ export function MapCanvas({
                   filter: highlight
                     ? "drop-shadow(0 0 2px #ff2d9b)"
                     : undefined,
+                  cursor: self ? "default" : "pointer",
                 }}
                 aria-label={u.name}
               >

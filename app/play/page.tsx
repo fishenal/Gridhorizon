@@ -4,6 +4,6 @@ import PlayClient from "./PlayClient";
 
 export default async function PlayRoute() {
   const session = await auth();
-  if (!session?.user) redirect("/login");
+  if (!session?.user) redirect("/");
   return <PlayClient />;
 }

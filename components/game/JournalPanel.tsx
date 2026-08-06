@@ -3,8 +3,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { buildingEmoji } from "@/lib/game/playerStyle";
 
-type Tab = "log" | "assets";
-
 export type ActivityEntry = {
   id: number;
   type: string;
@@ -12,17 +10,8 @@ export type ActivityEntry = {
   createdAt: string;
 };
 
-type OwnedBuilding = {
-  id: number;
-  type: string;
-  name: string | null;
-  x: number;
-  y: number;
-  createdAt: string;
-};
-
 type Props = {
-  /** Bump to refetch logs / buildings from server */
+  /** Bump to refetch logs from server */
   refreshToken?: number;
   /** Optimistic entries shown immediately (negative ids) */
   localLogs?: ActivityEntry[];
@@ -80,6 +69,38 @@ function formatActivity(entry: ActivityEntry): string {
       }
       return `Built ${kind}${name}`;
     }
+    case "toll_paid": {
+      const amount = typeof p.amount === "number" ? p.amount : 0;
+      const kind = buildingEmoji(String(p.buildingType ?? ""));
+      const name =
+        typeof p.buildingName === "string" && p.buildingName
+          ? ` "${p.buildingName}"`
+          : "";
+      const owner =
+        typeof p.ownerName === "string" && p.ownerName
+          ? p.ownerName
+          : "someone";
+      const at = asPoint(p.at);
+      return `Paid ${amount} gold toll at ${kind}${name} (${owner})${
+        at ? ` · (${at.x},${at.y})` : ""
+      }`;
+    }
+    case "toll_received": {
+      const amount = typeof p.amount === "number" ? p.amount : 0;
+      const kind = buildingEmoji(String(p.buildingType ?? ""));
+      const name =
+        typeof p.buildingName === "string" && p.buildingName
+          ? ` "${p.buildingName}"`
+          : "";
+      const from =
+        typeof p.fromPlayerName === "string" && p.fromPlayerName
+          ? p.fromPlayerName
+          : "a traveler";
+      const at = asPoint(p.at);
+      return `Received ${amount} gold toll at ${kind}${name} from ${from}${
+        at ? ` · (${at.x},${at.y})` : ""
+      }`;
+    }
     default:
       return entry.type;
   }
@@ -104,6 +125,14 @@ export function activityFingerprint(entry: ActivityEntry): string {
     }
     case "build":
       return `build:${p.buildingType}:${p.x},${p.y}:${p.name ?? ""}`;
+    case "toll_paid": {
+      const at = asPoint(p.at);
+      return `toll_paid:${p.buildingId}:${p.amount}:${at?.x},${at?.y}`;
+    }
+    case "toll_received": {
+      const at = asPoint(p.at);
+      return `toll_received:${p.buildingId}:${p.fromPlayerId}:${p.amount}:${at?.x},${at?.y}`;
+    }
     default:
       return `${entry.type}:${JSON.stringify(p)}`;
   }
@@ -127,18 +156,13 @@ export function JournalPanel({
   localLogs = [],
   onLocalLogsMatched,
 }: Props) {
-  const [tab, setTab] = useState<Tab>("log");
   const [serverLogs, setServerLogs] = useState<ActivityEntry[]>([]);
-  const [buildings, setBuildings] = useState<OwnedBuilding[]>([]);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [actRes, bldRes] = await Promise.all([
-        fetch("/api/activity"),
-        fetch("/api/buildings/mine"),
-      ]);
+      const actRes = await fetch("/api/activity");
       if (actRes.ok) {
         const data = (await actRes.json()) as { logs?: ActivityEntry[] };
         const next = data.logs ?? [];
@@ -150,10 +174,6 @@ export function JournalPanel({
             .map((l) => l.id);
           if (matched.length > 0) onLocalLogsMatched(matched);
         }
-      }
-      if (bldRes.ok) {
-        const data = (await bldRes.json()) as { buildings?: OwnedBuilding[] };
-        setBuildings(data.buildings ?? []);
       }
     } catch {
       // ignore network blips
@@ -170,86 +190,45 @@ export function JournalPanel({
   }, [refreshToken]);
 
   const displayLogs = useMemo(() => {
-    const serverKeys = new Set(serverLogs.map(activityFingerprint));
-    const pending = localLogs.filter(
-      (l) => !serverKeys.has(activityFingerprint(l)),
+    const byKey = new Map<string, ActivityEntry>();
+    for (const e of [...serverLogs].reverse()) {
+      byKey.set(activityFingerprint(e), e);
+    }
+    for (const e of localLogs) {
+      const k = activityFingerprint(e);
+      if (!byKey.has(k)) byKey.set(k, e);
+    }
+    return [...byKey.values()].sort((a, b) =>
+      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
     );
-    return [...pending, ...serverLogs];
   }, [localLogs, serverLogs]);
 
   return (
     <div className="pointer-events-auto flex w-[260px] flex-col overflow-hidden rounded-xl border border-stone-200 bg-white/95 shadow-lg backdrop-blur">
-      <div className="flex border-b border-stone-200">
-        <button
-          type="button"
-          onClick={() => setTab("log")}
-          className={`flex-1 px-3 py-2 text-xs font-medium ${
-            tab === "log"
-              ? "bg-stone-100 text-stone-900"
-              : "text-stone-500 hover:text-stone-800"
-          }`}
-        >
-          Log
-        </button>
-        <button
-          type="button"
-          onClick={() => setTab("assets")}
-          className={`flex-1 px-3 py-2 text-xs font-medium ${
-            tab === "assets"
-              ? "bg-stone-100 text-stone-900"
-              : "text-stone-500 hover:text-stone-800"
-          }`}
-        >
-          Assets
-        </button>
+      <div className="border-b border-stone-200 px-3 py-2">
+        <p className="text-xs font-medium text-stone-900">Log</p>
       </div>
 
       <div
         className="overflow-y-auto p-2"
         style={{ maxHeight: "min(42vh, calc(100dvh - 280px))" }}
       >
-        {loading && displayLogs.length === 0 && buildings.length === 0 ? (
+        {loading && displayLogs.length === 0 ? (
           <p className="px-1 py-2 text-[11px] text-stone-400">Loading…</p>
-        ) : tab === "log" ? (
-          displayLogs.length === 0 ? (
-            <p className="px-1 py-2 text-[11px] text-stone-400">No activity yet</p>
-          ) : (
-            <ul className="space-y-2">
-              {displayLogs.map((entry) => (
-                <li
-                  key={entry.id}
-                  className="rounded-lg border border-stone-100 bg-white/80 px-2 py-1.5"
-                >
-                  <p className="text-[11px] leading-snug text-stone-800">
-                    {formatActivity(entry)}
-                  </p>
-                  <p className="mt-0.5 text-[10px] text-stone-400">
-                    {formatTime(entry.createdAt)}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          )
-        ) : buildings.length === 0 ? (
-          <p className="px-1 py-2 text-[11px] text-stone-400">
-            No assets yet
-          </p>
+        ) : displayLogs.length === 0 ? (
+          <p className="px-1 py-2 text-[11px] text-stone-400">No activity yet</p>
         ) : (
           <ul className="space-y-2">
-            {buildings.map((b) => (
+            {displayLogs.map((entry) => (
               <li
-                key={b.id}
+                key={entry.id}
                 className="rounded-lg border border-stone-100 bg-white/80 px-2 py-1.5"
               >
-                <p className="text-[11px] font-medium text-stone-800">
-                  <span aria-hidden>{buildingEmoji(b.type)}</span>
-                  {b.name ? ` · ${b.name}` : ""}
-                </p>
-                <p className="text-[11px] text-pink-600">
-                  ({b.x}, {b.y})
+                <p className="text-[11px] leading-snug text-stone-800">
+                  {formatActivity(entry)}
                 </p>
                 <p className="mt-0.5 text-[10px] text-stone-400">
-                  {formatTime(b.createdAt)}
+                  {formatTime(entry.createdAt)}
                 </p>
               </li>
             ))}

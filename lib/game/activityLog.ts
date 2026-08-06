@@ -8,6 +8,8 @@ export type ActivityType =
   | "travel_stop"
   | "travel_arrive"
   | "build"
+  | "toll_paid"
+  | "toll_received"
   | (string & {});
 
 export type TravelStartPayload = {
@@ -28,6 +30,26 @@ export type BuildPayload = {
   x: number;
   y: number;
   buildingId?: number;
+};
+
+export type TollPaidPayload = {
+  amount: number;
+  buildingType: string;
+  buildingName: string | null;
+  buildingId: number;
+  ownerId: number;
+  ownerName: string;
+  at: ActivityPoint;
+};
+
+export type TollReceivedPayload = {
+  amount: number;
+  buildingType: string;
+  buildingName: string | null;
+  buildingId: number;
+  fromPlayerId: number;
+  fromPlayerName: string;
+  at: ActivityPoint;
 };
 
 export async function appendActivityLog(
@@ -99,6 +121,34 @@ export async function logBuild(
     playerId,
     mapId,
     type: "build",
+    payload,
+  });
+}
+
+export async function logTollPaid(
+  db: Db,
+  playerId: number,
+  mapId: number,
+  payload: TollPaidPayload,
+): Promise<void> {
+  await appendActivityLog(db, {
+    playerId,
+    mapId,
+    type: "toll_paid",
+    payload,
+  });
+}
+
+export async function logTollReceived(
+  db: Db,
+  playerId: number,
+  mapId: number,
+  payload: TollReceivedPayload,
+): Promise<void> {
+  await appendActivityLog(db, {
+    playerId,
+    mapId,
+    type: "toll_received",
     payload,
   });
 }

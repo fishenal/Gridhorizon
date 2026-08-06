@@ -39,7 +39,8 @@ export function MovePad({
 }: Props) {
   const [dx, setDx] = useState(0);
   const [dy, setDy] = useState(-1);
-  const [steps, setSteps] = useState(10);
+  /** String draft so clearing the field does not coerce to 0. */
+  const [stepsText, setStepsText] = useState("10");
   const [submitting, setSubmitting] = useState(false);
   const [stepsError, setStepsError] = useState("");
 
@@ -47,15 +48,16 @@ export function MovePad({
 
   async function handleMove() {
     if ((dx === 0 && dy === 0) || locked) return;
-    const n = Number(steps);
+    const n = Number.parseInt(stepsText.trim(), 10);
     if (!Number.isFinite(n) || n < 1 || n > MAX_TRAVEL_STEPS) {
       setStepsError(`Steps must be 1–${MAX_TRAVEL_STEPS}`);
       return;
     }
     setStepsError("");
+    setStepsText(String(n));
     setSubmitting(true);
     try {
-      await onMove(dx, dy, Math.floor(n));
+      await onMove(dx, dy, n);
     } finally {
       setSubmitting(false);
     }
@@ -105,14 +107,22 @@ export function MovePad({
             return (
               <input
                 key="steps"
-                type="number"
-                min={1}
-                max={MAX_TRAVEL_STEPS}
-                value={steps}
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={stepsText}
                 disabled={locked}
                 onChange={(e) => {
-                  setSteps(Number(e.target.value));
+                  const next = e.target.value.replace(/\D/g, "");
+                  setStepsText(next);
                   setStepsError("");
+                }}
+                onBlur={() => {
+                  if (stepsText === "") return;
+                  const n = Number.parseInt(stepsText, 10);
+                  if (Number.isFinite(n) && n >= 1) {
+                    setStepsText(String(n));
+                  }
                 }}
                 className={`h-10 w-full rounded border bg-white text-center text-sm tabular-nums disabled:opacity-50 ${
                   stepsError
