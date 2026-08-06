@@ -48,6 +48,8 @@ export type MapPlayer = {
   x: number;
   y: number;
   emoji?: string;
+  bubble?: string;
+  online?: boolean;
 };
 
 export type SelectedPlayer = {
@@ -57,6 +59,8 @@ export type SelectedPlayer = {
   x: number;
   y: number;
   emoji: string;
+  bubble?: string;
+  online?: boolean;
 };
 
 export type SelectedFlag = {
@@ -373,6 +377,8 @@ export function MapCanvas({
         x: atPlayer.x,
         y: atPlayer.y,
         emoji: normalizePlayerEmoji(atPlayer.emoji),
+        bubble: atPlayer.bubble,
+        online: atPlayer.online,
       };
     }
     const t = tileMap.get(`${wx},${wy}`);
@@ -574,6 +580,10 @@ export function MapCanvas({
             const terrain = tile && !tile.fog ? tile.terrain : undefined;
             const face = displayUnitEmoji(u.emoji, terrain);
             const facePx = Math.max(10, Math.min(size * 0.85, 28));
+            const offline = !self && u.online === false;
+            const bubble = (u.bubble ?? "").trim();
+            const bubblePreview =
+              bubble.length > 48 ? `${bubble.slice(0, 48)}…` : bubble;
             return (
               <button
                 key={u.id}
@@ -590,6 +600,8 @@ export function MapCanvas({
                     x: u.x,
                     y: u.y,
                     emoji: normalizePlayerEmoji(u.emoji),
+                    bubble: u.bubble,
+                    online: u.online,
                   });
                 }}
                 className="pointer-events-auto absolute flex items-center justify-center bg-transparent"
@@ -601,13 +613,29 @@ export function MapCanvas({
                   transform: "translate(-50%, -50%)",
                   fontSize: facePx,
                   lineHeight: 1,
+                  opacity: offline ? 0.45 : 1,
                   filter: highlight
                     ? "drop-shadow(0 0 2px #ff2d9b)"
                     : undefined,
                   cursor: self ? "default" : "pointer",
                 }}
-                aria-label={u.name}
+                aria-label={
+                  offline ? `${u.name} (offline)` : u.name
+                }
+                title={bubble || undefined}
               >
+                {bubblePreview ? (
+                  <span
+                    className="pointer-events-none absolute left-1/2 z-10 max-w-[140px] -translate-x-1/2 whitespace-pre-wrap break-words rounded-md border border-stone-200 bg-white px-1.5 py-0.5 text-center text-[9px] leading-snug text-stone-700 shadow-sm"
+                    style={{
+                      bottom: "100%",
+                      marginBottom: 2,
+                    }}
+                    aria-hidden
+                  >
+                    {bubblePreview}
+                  </span>
+                ) : null}
                 <span aria-hidden>{face}</span>
               </button>
             );

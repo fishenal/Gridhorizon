@@ -1,6 +1,5 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
 import { normalizePlayerEmoji } from "@/lib/game/playerStyle";
 
 export type OnlinePlayer = {
@@ -14,43 +13,13 @@ export type OnlinePlayer = {
 };
 
 type Props = {
-  refreshToken?: number;
+  players: OnlinePlayer[];
   /** Keep self coords in sync with local travel */
   self?: { id: number; name: string; emoji?: string; x: number; y: number };
   onPlayerClick?: (player: OnlinePlayer) => void;
 };
 
-export function OnlinePlayers({
-  refreshToken = 0,
-  self,
-  onPlayerClick,
-}: Props) {
-  const [players, setPlayers] = useState<OnlinePlayer[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch("/api/players/online");
-      if (!res.ok) return;
-      const data = (await res.json()) as { players?: OnlinePlayer[] };
-      setPlayers(data.players ?? []);
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load, refreshToken]);
-
-  useEffect(() => {
-    const id = setInterval(() => void load(), 30_000);
-    return () => clearInterval(id);
-  }, [load]);
-
+export function OnlinePlayers({ players, self, onPlayerClick }: Props) {
   const display = players.map((p) => {
     if (self && p.id === self.id) {
       return {
@@ -68,7 +37,6 @@ export function OnlinePlayers({
     };
   });
 
-  // Ensure self appears even before first fetch completes
   const list =
     display.length > 0
       ? display
@@ -100,9 +68,7 @@ export function OnlinePlayers({
         className="overflow-y-auto p-1.5"
         style={{ maxHeight: "min(28vh, 220px)" }}
       >
-        {loading && list.length === 0 ? (
-          <li className="px-2 py-1.5 text-[11px] text-stone-400">Loading…</li>
-        ) : list.length === 0 ? (
+        {list.length === 0 ? (
           <li className="px-2 py-1.5 text-[11px] text-stone-400">No one here</li>
         ) : (
           list.map((p) => (

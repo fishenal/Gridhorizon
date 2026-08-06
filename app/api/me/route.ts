@@ -8,7 +8,7 @@ import { touchLastSeen } from "@/lib/game/presence";
 import { TRAVEL_SECONDS_PER_TILE, VISION_RADIUS } from "@/lib/map/constants";
 import { listFriends } from "@/lib/game/social";
 import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
-import { normalizePlayerEmoji } from "@/lib/game/playerStyle";
+import { normalizeBubble, normalizePlayerEmoji } from "@/lib/game/playerStyle";
 
 export async function GET() {
   try {
@@ -75,6 +75,7 @@ export async function GET() {
         food: player.food,
         status: player.status,
         emoji: normalizePlayerEmoji(player.emoji),
+        bubble: normalizeBubble(player.bubble),
         currentMapId: world.id,
       },
       travel,

@@ -42,6 +42,8 @@ export const players = pgTable("players", {
   status: text("status").notNull().default("idle"), // idle | traveling
   /** Player avatar emoji (shown on map; boat on water overrides display). */
   emoji: text("emoji").notNull().default("🙂"),
+  /** Short speech bubble over avatar; empty = hidden. Max 300 chars enforced in API. */
+  bubble: text("bubble").notNull().default(""),
   economySettledAt: timestamp("economy_settled_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

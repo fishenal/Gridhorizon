@@ -5,8 +5,10 @@ import { getDb } from "@/lib/db";
 import { buildings, players, tileClaims } from "@/lib/db/schema";
 import {
   FLAG_RANGE_RADIUS,
+  normalizeBubble,
   normalizePlayerEmoji,
 } from "@/lib/game/playerStyle";
+import { isOnlineFromLastSeen } from "@/lib/game/presence";
 import { VISION_RADIUS } from "@/lib/map/constants";
 import { loadExploredSet } from "@/lib/map/explore";
 import { generateTile } from "@/lib/map/generator";
@@ -110,8 +112,10 @@ export async function GET(req: Request) {
         id: players.id,
         name: players.name,
         emoji: players.emoji,
+        bubble: players.bubble,
         x: players.x,
         y: players.y,
+        lastSeenAt: players.lastSeenAt,
       })
       .from(players)
       .where(
@@ -203,15 +207,21 @@ export async function GET(req: Request) {
         name: me.name,
         id: me.id,
         emoji: normalizePlayerEmoji(me.emoji),
+        bubble: normalizeBubble(me.bubble),
       },
       visionRadius: visionR,
       viewRadius: viewR,
       mapId,
       tiles,
-      players: visibleOthers.map((p) => ({
-        ...p,
-        emoji: normalizePlayerEmoji(p.emoji),
-      })),
+      players: visibleOthers.map((p) => {
+        const { lastSeenAt, ...rest } = p;
+        return {
+          ...rest,
+          emoji: normalizePlayerEmoji(p.emoji),
+          bubble: normalizeBubble(p.bubble),
+          online: isOnlineFromLastSeen(lastSeenAt),
+        };
+      }),
     });
   } catch (err) {
     console.error("[api/map/viewport]", err);

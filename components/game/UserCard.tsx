@@ -1,22 +1,26 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Terrain } from "@/lib/map/generator";
 import { FLAG_COST } from "@/lib/map/constants";
 import {
   AVATAR_EMOJI_CHOICES,
   FLAG_RANGE_RADIUS,
   influenceSide,
+  normalizeBubble,
   normalizePlayerEmoji,
 } from "@/lib/game/playerStyle";
 import type { SelectedFlag, SelectedTown } from "@/components/game/MapCanvas";
 
 export type BuildKind = "flag" | "town";
 
+const BUBBLE_MAX = 300;
+
 type Props = {
   name: string;
   playerId: number;
   emoji?: string;
+  bubble?: string;
   gold?: number;
   xp?: number;
   x: number;
@@ -29,6 +33,7 @@ type Props = {
   busy?: boolean;
   onBuildSelect?: (kind: BuildKind) => void;
   onEmojiChange?: (emoji: string) => void;
+  onBubbleChange?: (bubble: string) => void;
 };
 
 const TYPE_LABEL: Record<string, string> = {
@@ -58,6 +63,7 @@ function EmojiFace({ emoji, size = 40 }: { emoji: string; size?: number }) {
 export function UserCard({
   name,
   emoji,
+  bubble,
   gold,
   xp,
   x,
@@ -69,9 +75,22 @@ export function UserCard({
   busy,
   onBuildSelect,
   onEmojiChange,
+  onBubbleChange,
 }: Props) {
   const options = isSelf && onBuildSelect ? buildOptions(terrain) : [];
   const face = normalizePlayerEmoji(emoji);
+  const [draft, setDraft] = useState(() => normalizeBubble(bubble));
+
+  useEffect(() => {
+    setDraft(normalizeBubble(bubble));
+  }, [bubble]);
+
+  const saveBubble = () => {
+    if (!onBubbleChange) return;
+    const next = normalizeBubble(draft);
+    if (next === normalizeBubble(bubble)) return;
+    onBubbleChange(next);
+  };
 
   return (
     <div className="pointer-events-auto w-48 rounded-xl border border-stone-200 bg-white/95 p-3 shadow-lg backdrop-blur">
@@ -109,6 +128,36 @@ export function UserCard({
               </div>
             </div>
           ) : null}
+          {onBubbleChange ? (
+            <div className="mb-2 border-t border-stone-100 pt-2">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <p className="text-[11px] text-stone-500">Bubble</p>
+                <p className="text-[10px] text-stone-400">
+                  {draft.length}/{BUBBLE_MAX}
+                </p>
+              </div>
+              <textarea
+                value={draft}
+                disabled={busy}
+                maxLength={BUBBLE_MAX}
+                rows={3}
+                placeholder="Say something…"
+                onChange={(e) =>
+                  setDraft(e.target.value.slice(0, BUBBLE_MAX))
+                }
+                onBlur={saveBubble}
+                className="w-full resize-none rounded-lg border border-stone-200 bg-white px-2 py-1.5 text-[11px] text-stone-800 placeholder:text-stone-400 focus:border-pink-300 focus:outline-none disabled:opacity-40"
+              />
+              <button
+                type="button"
+                disabled={busy}
+                onClick={saveBubble}
+                className="mt-1 w-full rounded-lg border border-stone-200 bg-stone-50 px-2 py-1 text-[11px] text-stone-700 hover:bg-stone-100 disabled:opacity-40"
+              >
+                Save bubble
+              </button>
+            </div>
+          ) : null}
           {tileOccupied ? (
             <p className="text-[11px] text-stone-500">
               This tile already has a building
@@ -139,6 +188,10 @@ export function UserCard({
             </div>
           ) : null}
         </>
+      ) : bubble?.trim() ? (
+        <p className="mt-2 border-t border-stone-100 pt-2 text-[11px] leading-snug text-stone-600">
+          {normalizeBubble(bubble)}
+        </p>
       ) : null}
     </div>
   );

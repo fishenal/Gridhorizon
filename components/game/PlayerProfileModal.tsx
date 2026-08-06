@@ -12,6 +12,7 @@ export type PlayerProfileTarget = {
   emoji?: string;
   x?: number;
   y?: number;
+  online?: boolean;
 };
 
 type BuildingRow = {
@@ -32,6 +33,7 @@ type ProfileData = {
     x: number;
     y: number;
     status: string;
+    online?: boolean;
     xp: number;
     gold: number;
   };
@@ -98,6 +100,8 @@ export function PlayerProfileModal({ target, onClose }: Props) {
   const name = data?.player.name ?? target.name;
   const x = data?.player.x ?? target.x;
   const y = data?.player.y ?? target.y;
+  const online = target.online ?? data?.player.online ?? false;
+  const traveling = data?.player.status === "traveling";
 
   return (
     <div
@@ -112,7 +116,11 @@ export function PlayerProfileModal({ target, onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-3 border-b border-stone-100 px-4 py-3">
-          <span className="text-3xl leading-none" aria-hidden>
+          <span
+            className="text-3xl leading-none"
+            aria-hidden
+            style={{ opacity: online ? 1 : 0.45 }}
+          >
             {face}
           </span>
           <div className="min-w-0 flex-1">
@@ -125,9 +133,12 @@ export function PlayerProfileModal({ target, onClose }: Props) {
             {x != null && y != null ? (
               <p className="text-xs text-stone-500">
                 ({x}, {y})
-                {data?.player.status === "traveling" ? " · moving" : ""}
               </p>
             ) : null}
+            <p className="mt-0.5 text-xs text-stone-600">
+              {online ? "Online" : "Offline"}
+              {online && traveling ? " · moving" : ""}
+            </p>
             {data ? (
               <p className="mt-1 text-xs text-stone-600">
                 Gold {data.player.gold} · XP {data.player.xp}

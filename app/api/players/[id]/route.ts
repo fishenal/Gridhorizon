@@ -3,7 +3,8 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { getDb } from "@/lib/db";
 import { buildings, players } from "@/lib/db/schema";
-import { normalizePlayerEmoji } from "@/lib/game/playerStyle";
+import { normalizeBubble, normalizePlayerEmoji } from "@/lib/game/playerStyle";
+import { isOnlineFromLastSeen } from "@/lib/game/presence";
 import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -52,9 +53,11 @@ export async function GET(_req: Request, ctx: Ctx) {
         id: player.id,
         name: player.name,
         emoji: normalizePlayerEmoji(player.emoji),
+        bubble: normalizeBubble(player.bubble),
         x: player.x,
         y: player.y,
         status: player.status,
+        online: isOnlineFromLastSeen(player.lastSeenAt),
         xp: player.xp,
         gold: player.gold,
       },

@@ -11,7 +11,7 @@ import {
 } from "@/components/game/MapCanvas";
 import { MovePad, type TravelProgress } from "@/components/game/MovePad";
 import { Minimap } from "@/components/game/Minimap";
-import { OnlinePlayers } from "@/components/game/OnlinePlayers";
+import { OnlinePlayers, type OnlinePlayer } from "@/components/game/OnlinePlayers";
 import { PlayerStatusPanel } from "@/components/game/PlayerStatusPanel";
 import {
   PlayerProfileModal,
@@ -22,6 +22,7 @@ import { MapPointPopup } from "@/components/game/MapPointPopup";
 import { generateTile } from "@/lib/map/generator";
 import {
   FLAG_RANGE_RADIUS,
+  normalizeBubble,
   normalizePlayerEmoji,
 } from "@/lib/game/playerStyle";
 import { ZoomSlider } from "@/components/game/ZoomSlider";
@@ -50,6 +51,23 @@ import {
   type TollStructure,
 } from "@/lib/game/structureToll";
 import { xpForToll } from "@/lib/game/xp";
+import {
+  isMapRealtimeMessage,
+  mapChannelName,
+  type BuildMessage,
+  type PresenceMember,
+} from "@/lib/ably/channels";
+import { closeAblyClient, getAblyClient } from "@/lib/ably/client";
+import {
+  markMapOtherOffline,
+  mergeViewportPlayers,
+  patchMapOtherBubble,
+  presenceToOnline,
+  removeOnlinePlayer,
+  upsertMapOther,
+  upsertOnlinePlayer,
+} from "@/lib/ably/merge";
+import type { RealtimeChannel } from "ably";
 
 type MeResponse = {
   player: {
@@ -65,6 +83,8 @@ type MeResponse = {
     food: number;
     status: string;
     emoji: string;
+    bubble?: string;
+    currentMapId?: number;
   };
   travel: {
     pathIndex: number;
@@ -75,6 +95,7 @@ type MeResponse = {
     target: { x: number; y: number };
   } | null;
   friends: Array<{ id: number; name: string; x: number; y: number }>;
+  map?: { id: number; slug: string; name: string; seed: number; size: number };
   config: {
     travelSecondsPerTile: number;
     worldSeed: number;
@@ -93,6 +114,8 @@ type ViewportResponse = {
     x: number;
     y: number;
     emoji?: string;
+    bubble?: string;
+    online?: boolean;
   }>;
 };
 
@@ -165,10 +188,28 @@ export default function PlayClient() {
   const [exploredRevision, setExploredRevision] = useState(0);
   const [journalTick, setJournalTick] = useState(0);
   const [localLogs, setLocalLogs] = useState<ActivityEntry[]>([]);
+  const [onlinePlayers, setOnlinePlayers] = useState<OnlinePlayer[]>([]);
   const localLogSeqRef = useRef(0);
   const hoverCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const ablyReadyRef = useRef(false);
+  const ablyPresentIdsRef = useRef<Set<number>>(new Set());
+  const ablyChannelRef = useRef<RealtimeChannel | null>(null);
+  const meMetaRef = useRef<{
+    id: number;
+    name: string;
+    emoji: string;
+    bubble: string;
+    mapId: number;
+  } | null>(null);
+  const softRefreshRef = useRef<() => void>(() => {});
+  const publishRealtimeRef = useRef<{
+    publishPos: (pos: Point, status: string) => void;
+    publishBubble: (bubble: string) => void;
+    publishBuild: (msg: Omit<BuildMessage, "type">) => void;
+    publishToll: (toPlayerId: number, amount: number) => void;
+  } | null>(null);
 
   const pushLocalLog = useCallback(
     (type: string, payload: Record<string, unknown>) => {
@@ -180,6 +221,24 @@ export default function PlayClient() {
     },
     [],
   );
+
+  useEffect(() => {
+    if (!me?.player) return;
+    meMetaRef.current = {
+      id: me.player.id,
+      name: me.player.name,
+      emoji: normalizePlayerEmoji(me.player.emoji),
+      bubble: normalizeBubble(me.player.bubble),
+      mapId: me.player.currentMapId ?? me.map?.id ?? 1,
+    };
+  }, [
+    me?.player.id,
+    me?.player.name,
+    me?.player.emoji,
+    me?.player.bubble,
+    me?.player.currentMapId,
+    me?.map?.id,
+  ]);
 
   const removeLocalLog = useCallback((id: number) => {
     setLocalLogs((prev) => prev.filter((e) => e.id !== id));
@@ -312,10 +371,12 @@ export default function PlayClient() {
       // Optimistic gold + XP only — log comes from server after settle.
       let gold = goldRef.current;
       let tollXp = 0;
+      const ownerNotices: Array<{ ownerId: number; amount: number }> = [];
       for (const { structure: b } of entries) {
         if (b.amount <= 0 || gold < b.amount) break;
         gold -= b.amount;
         tollXp += xpForToll(b.amount);
+        ownerNotices.push({ ownerId: b.ownerId, amount: b.amount });
       }
       if (gold === goldRef.current && tollXp === 0) return;
 
@@ -355,6 +416,9 @@ export default function PlayClient() {
               };
             });
           }
+          for (const n of ownerNotices) {
+            publishRealtimeRef.current?.publishToll(n.ownerId, n.amount);
+          }
           setJournalTick((t) => t + 1);
         } catch {
           // soft — stop/arrive settle will catch up
@@ -389,8 +453,8 @@ export default function PlayClient() {
           }
         }
 
-        let players = undefined as
-          | Array<{ id: number; name: string; x: number; y: number }>
+        let httpPlayers:
+          | ViewportResponse["players"]
           | undefined;
         if (vpRes.ok) {
           const vpData = await readJson<ViewportResponse>(vpRes);
@@ -399,7 +463,7 @@ export default function PlayClient() {
             for (const [k, v] of overlaysFromTiles(vpData.tiles)) {
               overlaysRef.current.set(k, v);
             }
-            players = vpData.players;
+            httpPlayers = vpData.players;
             setExploredRevision((n) => n + 1);
           }
         }
@@ -410,12 +474,25 @@ export default function PlayClient() {
         const tiles = rebuildFogAt(live);
         setViewport((prev) => {
           if (!prev) return prev;
+          const nextPlayers =
+            httpPlayers == null
+              ? prev.players
+              : ablyReadyRef.current
+                ? mergeViewportPlayers({
+                    ablyIds: ablyPresentIdsRef.current,
+                    ablyPlayers: prev.players,
+                    httpPlayers,
+                    selfId: playerIdRef.current ?? -1,
+                    selfPos: live,
+                    visionRadius: visionRadiusRef.current,
+                  })
+                : httpPlayers;
           return {
             ...prev,
             center: { x: live.x, y: live.y },
             player: { ...prev.player, x: live.x, y: live.y },
             tiles,
-            players: players ?? prev.players,
+            players: nextPlayers,
           };
         });
       } catch {
@@ -497,6 +574,7 @@ export default function PlayClient() {
       }
       setExploredRevision((n) => n + 1);
       void syncExploredAt(pos);
+      publishRealtimeRef.current?.publishPos(pos, status);
     },
     [rebuildFogAt, syncExploredAt, localTooCloseToStructure],
   );
@@ -544,11 +622,14 @@ export default function PlayClient() {
       x: viewport.player.x,
       y: viewport.player.y,
       emoji: normalizePlayerEmoji(me.player.emoji),
+      bubble: normalizeBubble(me.player.bubble),
+      online: true,
     };
   }, [
     me?.player.id,
     me?.player.name,
     me?.player.emoji,
+    me?.player.bubble,
     viewport?.player.x,
     viewport?.player.y,
   ]);
@@ -631,6 +712,7 @@ export default function PlayClient() {
         // Keep travel payload only until local timer owns the trip
         travel: travelingRef.current || resumeTravel ? meData.travel : null,
         config: meData.config,
+        map: meData.map ?? prev?.map,
       }));
 
       const [vpRes, exploredRes] = await Promise.all([
@@ -667,7 +749,7 @@ export default function PlayClient() {
       const live = displayPosRef.current ?? display;
       const tiles = rebuildFogAt(live);
 
-      setViewport({
+      setViewport((prev) => ({
         center: { x: live.x, y: live.y },
         player: {
           id: vpData.player.id,
@@ -677,27 +759,40 @@ export default function PlayClient() {
         },
         visionRadius: visionRadiusRef.current,
         tiles,
-        players: vpData.players,
-      });
+        players: ablyReadyRef.current
+          ? mergeViewportPlayers({
+              ablyIds: ablyPresentIdsRef.current,
+              ablyPlayers: prev?.players ?? [],
+              httpPlayers: vpData.players,
+              selfId: meData.player.id,
+              selfPos: live,
+              visionRadius: visionRadiusRef.current,
+            })
+          : vpData.players,
+      }));
 
       if (!travelingRef.current) {
-        setSelection((prev) => {
-          if (!prev || prev.type !== "player") return prev;
-          if (prev.id === meData.player.id) {
+        setSelection((sel) => {
+          if (!sel || sel.type !== "player") return sel;
+          if (sel.id === meData.player.id) {
             return {
-              ...prev,
+              ...sel,
               x: live.x,
               y: live.y,
               name: meData.player.name,
             };
           }
-          const other = vpData.players.find((p) => p.id === prev.id);
-          if (!other) return prev;
+          if (ablyPresentIdsRef.current.has(sel.id)) {
+            return { ...sel, online: true };
+          }
+          const other = vpData.players.find((p) => p.id === sel.id);
+          if (!other) return sel;
           return {
-            ...prev,
+            ...sel,
             x: other.x,
             y: other.y,
             name: other.name,
+            online: other.online ?? false,
           };
         });
       }
@@ -721,11 +816,323 @@ export default function PlayClient() {
     }
   }, [rebuildFogAt]);
 
+  softRefreshRef.current = () => {
+    void softRefresh();
+  };
+
   useEffect(() => {
     void softRefresh();
     // mount once
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Ably realtime: presence + map channel (degrades silently if unavailable)
+  useEffect(() => {
+    if (!me?.player?.id) return;
+    const mapId = me.player.currentMapId ?? me.map?.id;
+    if (!mapId) return;
+
+    let cancelled = false;
+    const selfId = me.player.id;
+    const channelName = mapChannelName(mapId);
+
+    const applyPresenceMember = (raw: unknown, action: string) => {
+      if (!raw || typeof raw !== "object") return;
+      const data = raw as Partial<PresenceMember>;
+      if (typeof data.id !== "number" || data.id === selfId) return;
+      const member: PresenceMember = {
+        id: data.id,
+        name: typeof data.name === "string" ? data.name : `#${data.id}`,
+        emoji: normalizePlayerEmoji(data.emoji),
+        bubble: normalizeBubble(data.bubble),
+        x: typeof data.x === "number" ? data.x : 0,
+        y: typeof data.y === "number" ? data.y : 0,
+        status: typeof data.status === "string" ? data.status : "idle",
+      };
+      if (action === "leave" || action === "absent") {
+        ablyPresentIdsRef.current.delete(member.id);
+        setOnlinePlayers((prev) => removeOnlinePlayer(prev, member.id));
+        setViewport((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            players: markMapOtherOffline(prev.players, member.id),
+          };
+        });
+        return;
+      }
+      ablyPresentIdsRef.current.add(member.id);
+      setOnlinePlayers((prev) =>
+        upsertOnlinePlayer(prev, presenceToOnline(member)),
+      );
+      const selfPos = displayPosRef.current ?? {
+        x: member.x,
+        y: member.y,
+      };
+      setViewport((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          players: upsertMapOther(
+            prev.players,
+            { ...member, online: true },
+            selfId,
+            selfPos,
+            visionRadiusRef.current,
+          ),
+        };
+      });
+    };
+
+    const onMessage = (message: { data?: unknown }) => {
+      if (!isMapRealtimeMessage(message.data)) return;
+      const msg = message.data;
+      if (msg.type === "pos") {
+        if (msg.playerId === selfId) return;
+        setOnlinePlayers((prev) =>
+          upsertOnlinePlayer(prev, {
+            id: msg.playerId,
+            name: msg.name,
+            emoji: normalizePlayerEmoji(msg.emoji),
+            x: msg.x,
+            y: msg.y,
+            status: msg.status,
+          }),
+        );
+        ablyPresentIdsRef.current.add(msg.playerId);
+        const selfPos = displayPosRef.current ?? { x: msg.x, y: msg.y };
+        setViewport((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            players: upsertMapOther(
+              prev.players,
+              {
+                id: msg.playerId,
+                name: msg.name,
+                x: msg.x,
+                y: msg.y,
+                emoji: msg.emoji,
+                bubble: msg.bubble,
+                online: true,
+              },
+              selfId,
+              selfPos,
+              visionRadiusRef.current,
+            ),
+          };
+        });
+        return;
+      }
+      if (msg.type === "bubble") {
+        if (msg.playerId === selfId) return;
+        setViewport((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            players: patchMapOtherBubble(
+              prev.players,
+              msg.playerId,
+              msg.bubble,
+            ),
+          };
+        });
+        return;
+      }
+      if (msg.type === "build") {
+        overlaysRef.current.set(`${msg.x},${msg.y}`, {
+          building: {
+            id: msg.buildingId ?? -1,
+            type: msg.buildingType,
+            ownerId: msg.ownerId,
+            ownerName: msg.ownerName,
+            ownerEmoji: normalizePlayerEmoji(msg.ownerEmoji),
+            level: 1,
+            name: msg.name,
+            message: msg.name,
+            createdAt: new Date().toISOString(),
+            tollRadius: msg.tollRadius,
+          },
+          claim: overlaysRef.current.get(`${msg.x},${msg.y}`)?.claim ?? null,
+        });
+        const pos = displayPosRef.current;
+        if (pos) {
+          const tiles = rebuildFogAt(pos);
+          setViewport((prev) => (prev ? { ...prev, tiles } : prev));
+          setExploredRevision((n) => n + 1);
+        }
+        return;
+      }
+      if (msg.type === "toll") {
+        if (msg.toPlayerId !== selfId) return;
+        setJournalTick((t) => t + 1);
+        softRefreshRef.current();
+      }
+    };
+
+    void (async () => {
+      const client = getAblyClient();
+      if (!client || cancelled) return;
+
+      const channel = client.channels.get(channelName);
+      ablyChannelRef.current = channel;
+
+      publishRealtimeRef.current = {
+        publishPos: (pos, status) => {
+          const meta = meMetaRef.current;
+          if (!meta || !ablyReadyRef.current) return;
+          const payload: PresenceMember = {
+            id: meta.id,
+            name: meta.name,
+            emoji: meta.emoji,
+            bubble: meta.bubble,
+            x: pos.x,
+            y: pos.y,
+            status,
+          };
+          try {
+            void channel.presence.update(payload);
+            void channel.publish("pos", {
+              type: "pos",
+              playerId: meta.id,
+              name: meta.name,
+              emoji: meta.emoji,
+              bubble: meta.bubble,
+              x: pos.x,
+              y: pos.y,
+              status,
+            });
+          } catch {
+            // ignore publish errors
+          }
+        },
+        publishBubble: (bubble) => {
+          const meta = meMetaRef.current;
+          if (!meta || !ablyReadyRef.current) return;
+          const text = normalizeBubble(bubble);
+          const pos = displayPosRef.current ?? { x: 0, y: 0 };
+          const payload: PresenceMember = {
+            id: meta.id,
+            name: meta.name,
+            emoji: meta.emoji,
+            bubble: text,
+            x: pos.x,
+            y: pos.y,
+            status: travelingRef.current ? "traveling" : "idle",
+          };
+          try {
+            void channel.presence.update(payload);
+            void channel.publish("bubble", {
+              type: "bubble",
+              playerId: meta.id,
+              bubble: text,
+            });
+          } catch {
+            // ignore
+          }
+        },
+        publishBuild: (body) => {
+          if (!ablyReadyRef.current) return;
+          try {
+            void channel.publish("build", { type: "build", ...body });
+          } catch {
+            // ignore
+          }
+        },
+        publishToll: (toPlayerId, amount) => {
+          if (!ablyReadyRef.current) return;
+          try {
+            void channel.publish("toll", {
+              type: "toll",
+              toPlayerId,
+              amount,
+            });
+          } catch {
+            // ignore
+          }
+        },
+      };
+
+      try {
+        channel.subscribe(onMessage);
+        channel.presence.subscribe((msg) => {
+          applyPresenceMember(msg.data, msg.action);
+        });
+
+        const enterData: PresenceMember = {
+          id: me.player.id,
+          name: me.player.name,
+          emoji: normalizePlayerEmoji(me.player.emoji),
+          bubble: normalizeBubble(me.player.bubble),
+          x: displayPosRef.current?.x ?? me.player.x,
+          y: displayPosRef.current?.y ?? me.player.y,
+          status: travelingRef.current ? "traveling" : me.player.status,
+        };
+        await channel.presence.enter(enterData);
+        if (cancelled) return;
+
+        const members = await channel.presence.get();
+        if (cancelled) return;
+        ablyPresentIdsRef.current = new Set();
+        const online: OnlinePlayer[] = [
+          {
+            id: me.player.id,
+            name: me.player.name,
+            emoji: normalizePlayerEmoji(me.player.emoji),
+            x: enterData.x,
+            y: enterData.y,
+            status: enterData.status,
+            isSelf: true,
+          },
+        ];
+        for (const m of members) {
+          const data = m.data as Partial<PresenceMember> | undefined;
+          if (!data || typeof data.id !== "number" || data.id === selfId) {
+            continue;
+          }
+          online.push(
+            presenceToOnline({
+              id: data.id,
+              name: typeof data.name === "string" ? data.name : `#${data.id}`,
+              emoji: normalizePlayerEmoji(data.emoji),
+              x: typeof data.x === "number" ? data.x : 0,
+              y: typeof data.y === "number" ? data.y : 0,
+              status: typeof data.status === "string" ? data.status : "idle",
+            }),
+          );
+          applyPresenceMember(data, "present");
+        }
+        setOnlinePlayers(online);
+        ablyReadyRef.current = true;
+      } catch (err) {
+        console.warn("[ably] connect failed; staying on HTTP sync", err);
+        ablyReadyRef.current = false;
+        ablyPresentIdsRef.current = new Set();
+        publishRealtimeRef.current = null;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      ablyReadyRef.current = false;
+      ablyPresentIdsRef.current = new Set();
+      publishRealtimeRef.current = null;
+      const ch = ablyChannelRef.current;
+      ablyChannelRef.current = null;
+      if (ch) {
+        try {
+          void ch.presence.leave();
+          ch.unsubscribe();
+          ch.presence.unsubscribe();
+        } catch {
+          // ignore
+        }
+      }
+      closeAblyClient();
+    };
+    // Connect once per player/map; pose updates go through presence.update
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me?.player.id, me?.player.currentMapId, me?.map?.id, rebuildFogAt]);
 
   function finishLocalTravel(end: Point) {
     const origin = travelOriginRef.current;
@@ -1011,6 +1418,17 @@ export default function PlayClient() {
           : prev,
       );
       setExploredRevision((n) => n + 1);
+      publishRealtimeRef.current?.publishBuild({
+        buildingType: kind,
+        x,
+        y,
+        ownerId: me.player.id,
+        ownerName: me.player.name,
+        ownerEmoji: normalizePlayerEmoji(me.player.emoji),
+        name,
+        tollRadius:
+          kind === "flag" || kind === "town" ? FLAG_RANGE_RADIUS : null,
+      });
       void softRefresh();
     } catch {
       removeLocalLog(buildLogId);
@@ -1045,6 +1463,40 @@ export default function PlayClient() {
         m ? { ...m, player: { ...m.player, emoji: prev } } : m,
       );
       setError("Could not update avatar");
+    }
+  }
+
+  async function onBubbleChange(bubble: string) {
+    if (!me) return;
+    const next = normalizeBubble(bubble);
+    const prev = normalizeBubble(me.player.bubble);
+    setMe((m) =>
+      m ? { ...m, player: { ...m.player, bubble: next } } : m,
+    );
+    try {
+      const res = await fetch("/api/player/bubble", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bubble: next }),
+      });
+      if (!res.ok) {
+        setMe((m) =>
+          m ? { ...m, player: { ...m.player, bubble: prev } } : m,
+        );
+        setError("Could not update bubble");
+        return;
+      }
+      const data = await readJson<{ bubble?: string }>(res);
+      const saved = normalizeBubble(data?.bubble ?? next);
+      setMe((m) =>
+        m ? { ...m, player: { ...m.player, bubble: saved } } : m,
+      );
+      publishRealtimeRef.current?.publishBubble(saved);
+    } catch {
+      setMe((m) =>
+        m ? { ...m, player: { ...m.player, bubble: prev } } : m,
+      );
+      setError("Could not update bubble");
     }
   }
 
@@ -1138,6 +1590,7 @@ export default function PlayClient() {
               emoji: p.emoji,
               x: p.x,
               y: p.y,
+              online: p.online,
             })
           }
           onAnchorsChange={onAnchorsChange}
@@ -1159,7 +1612,7 @@ export default function PlayClient() {
               onSignOut={() => signOut({ callbackUrl: "/" })}
             />
             <OnlinePlayers
-              refreshToken={journalTick}
+              players={onlinePlayers}
               self={{
                 id: me.player.id,
                 name: me.player.name,
@@ -1174,6 +1627,7 @@ export default function PlayClient() {
                   emoji: p.emoji,
                   x: p.x,
                   y: p.y,
+                  online: true,
                 })
               }
             />
@@ -1211,6 +1665,11 @@ export default function PlayClient() {
                       ? me.player.emoji
                       : selection.emoji
                   }
+                  bubble={
+                    selection.id === me.player.id
+                      ? me.player.bubble
+                      : selection.bubble
+                  }
                   isSelf={selection.id === me.player.id}
                   gold={me.player.gold}
                   xp={me.player.xp ?? 0}
@@ -1226,6 +1685,11 @@ export default function PlayClient() {
                   onEmojiChange={
                     selection.id === me.player.id
                       ? (emoji) => void onEmojiChange(emoji)
+                      : undefined
+                  }
+                  onBubbleChange={
+                    selection.id === me.player.id
+                      ? (bubble) => void onBubbleChange(bubble)
                       : undefined
                   }
                 />

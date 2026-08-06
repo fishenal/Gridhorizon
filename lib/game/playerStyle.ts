@@ -62,6 +62,12 @@ export function normalizePlayerEmoji(raw: string | null | undefined): string {
   return DEFAULT_PLAYER_EMOJI;
 }
 
+/** Trim and cap speech bubble text; empty string hides the bubble. */
+export function normalizeBubble(raw: string | null | undefined): string {
+  if (!raw) return "";
+  return raw.trim().slice(0, 300);
+}
+
 export function displayUnitEmoji(
   avatarEmoji: string | null | undefined,
   terrain: string | undefined,

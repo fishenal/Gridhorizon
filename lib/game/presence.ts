@@ -5,6 +5,19 @@ import { players } from "@/lib/db/schema";
 /** Consider online if active within this window. */
 export const ONLINE_WINDOW_MS = 90_000;
 
+export function isOnlineFromLastSeen(
+  lastSeenAt: Date | string | null | undefined,
+  now = Date.now(),
+): boolean {
+  if (!lastSeenAt) return false;
+  const t =
+    lastSeenAt instanceof Date
+      ? lastSeenAt.getTime()
+      : new Date(lastSeenAt).getTime();
+  if (!Number.isFinite(t)) return false;
+  return now - t <= ONLINE_WINDOW_MS;
+}
+
 export async function touchLastSeen(db: Db, playerId: number): Promise<void> {
   await db
     .update(players)
