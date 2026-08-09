@@ -25,6 +25,7 @@ const stopSchema = z.object({
   mode: z.literal("stop"),
   x: z.number().int(),
   y: z.number().int(),
+  reason: z.enum(["manual", "arrived"]).optional(),
 });
 
 export async function POST(req: Request) {
@@ -44,6 +45,7 @@ export async function POST(req: Request) {
         playerId,
         asStop.data.x,
         asStop.data.y,
+        asStop.data.reason ?? "manual",
       );
       if (!result.ok) {
         return NextResponse.json({ error: result.error }, { status: 400 });

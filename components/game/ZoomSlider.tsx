@@ -23,7 +23,7 @@ export function ZoomSlider({
 
   return (
     <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-stone-200 bg-white/95 px-3 py-1.5 shadow-md backdrop-blur">
-      <span className="shrink-0 text-[10px] text-stone-500">缩小</span>
+      <span className="shrink-0 text-[10px] text-stone-500">Out</span>
       <input
         type="range"
         min={ZOOM_MIN}
@@ -32,9 +32,9 @@ export function ZoomSlider({
         value={zoomLevel}
         onChange={(e) => onZoomLevelChange(Number(e.target.value))}
         className="h-1.5 w-36 cursor-pointer accent-pink-500 sm:w-48"
-        aria-label="地图缩放"
+        aria-label="Map zoom"
       />
-      <span className="shrink-0 text-[10px] text-stone-500">放大</span>
+      <span className="shrink-0 text-[10px] text-stone-500">In</span>
       <span className="min-w-14 shrink-0 text-right text-[10px] font-medium text-stone-700">
         {gridSize}×{gridSize}
       </span>

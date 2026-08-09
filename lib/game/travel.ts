@@ -1,17 +1,11 @@
 import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "@/lib/db";
-import {
-  buildings,
-  players,
-  travelJobs,
-  waypointPasses,
-} from "@/lib/db/schema";
+import { buildings, players, travelJobs } from "@/lib/db/schema";
 import {
   MAP_SIZE,
   MAX_TRAVEL_STEPS,
   TRAVEL_SECONDS_PER_TILE,
   VISION_RADIUS,
-  WAYPOINT_TOLL,
 } from "@/lib/map/constants";
 import { markExploredCells, shareExploration } from "@/lib/map/explore";
 import {
@@ -21,9 +15,25 @@ import {
   type Point,
 } from "@/lib/game/path";
 import { DEFAULT_MAP_ID } from "@/lib/map/world";
+import {
+  logTollPaid,
+  logTollReceived,
+  logTravelArrive,
+  logTravelStart,
+  logTravelStop,
+} from "@/lib/game/activityLog";
+import {
+  defaultTollAmount,
+  defaultTollRadius,
+  findTollEntries,
+  type TollStructure,
+} from "@/lib/game/structureToll";
+import { xpForSteps, xpForToll } from "@/lib/game/xp";
 
 export type { Point } from "@/lib/game/path";
 export { buildDirectionalPath, buildPath, clampToMap } from "@/lib/game/path";
+
+export type StopReason = "manual" | "arrived";
 
 function cellsInVision(cx: number, cy: number): Point[] {
   const cells: Point[] = [];
@@ -72,12 +82,18 @@ function collectExploredAlongPath(
   return cells;
 }
 
-/** Batch waypoint tolls for cells entered this settle (one bbox query). */
-async function settleWaypointsOnSegment(
+const TOLL_STRUCTURE_TYPES = ["flag", "town", "waypoint"] as const;
+
+/**
+ * Charge influence tolls for outside→inside transitions on this segment.
+ * Re-entry after leaving charges again; continuous stay does not.
+ */
+async function settleStructureTollsOnSegment(
   db: Db,
   playerId: number,
   mapId: number,
   segment: Point[],
+  previous: Point | null,
 ): Promise<void> {
   if (segment.length === 0) return;
 
@@ -91,79 +107,123 @@ async function settleWaypointsOnSegment(
     if (p.y < minY) minY = p.y;
     if (p.y > maxY) maxY = p.y;
   }
+  if (previous) {
+    minX = Math.min(minX, previous.x);
+    maxX = Math.max(maxX, previous.x);
+    minY = Math.min(minY, previous.y);
+    maxY = Math.max(maxY, previous.y);
+  }
 
-  const waypoints = await db
+  const pad = defaultTollRadius(null);
+  const candidates = await db
     .select()
     .from(buildings)
     .where(
       and(
         eq(buildings.mapId, mapId),
-        eq(buildings.type, "waypoint"),
-        gte(buildings.x, minX),
-        lte(buildings.x, maxX),
-        gte(buildings.y, minY),
-        lte(buildings.y, maxY),
+        inArray(buildings.type, [...TOLL_STRUCTURE_TYPES]),
+        gte(buildings.x, minX - pad),
+        lte(buildings.x, maxX + pad),
+        gte(buildings.y, minY - pad),
+        lte(buildings.y, maxY + pad),
       ),
     );
-  if (waypoints.length === 0) return;
+  if (candidates.length === 0) return;
 
-  const byCell = new Map<string, (typeof waypoints)[number]>();
-  for (const wp of waypoints) {
-    byCell.set(`${wp.x},${wp.y}`, wp);
-  }
+  const structures: TollStructure[] = candidates.map((b) => ({
+    id: b.id,
+    x: b.x,
+    y: b.y,
+    radius: defaultTollRadius(b.tollRadius),
+    ownerId: b.ownerId,
+    type: b.type,
+    name: b.name,
+    amount: defaultTollAmount(b.tollAmount),
+  }));
 
-  const hitOrder: Array<(typeof waypoints)[number]> = [];
-  const hitIds = new Set<number>();
-  for (const cell of segment) {
-    const wp = byCell.get(`${cell.x},${cell.y}`);
-    if (!wp || wp.ownerId === playerId || hitIds.has(wp.id)) continue;
-    hitIds.add(wp.id);
-    hitOrder.push(wp);
-  }
-  if (hitOrder.length === 0) return;
-
-  const hitBuildingIds = hitOrder.map((wp) => wp.id);
-  const existingPasses = await db
-    .select()
-    .from(waypointPasses)
-    .where(
-      and(
-        eq(waypointPasses.playerId, playerId),
-        inArray(waypointPasses.buildingId, hitBuildingIds),
-      ),
-    );
-  const passed = new Set(existingPasses.map((p) => p.buildingId));
+  const entries = findTollEntries(previous, segment, structures, playerId);
+  if (entries.length === 0) return;
 
   const traveler = await db.query.players.findFirst({
     where: eq(players.id, playerId),
   });
   if (!traveler) return;
 
+  const ownerIds = [...new Set(entries.map((e) => e.structure.ownerId))];
+  const ownerRows =
+    ownerIds.length > 0
+      ? await db
+          .select({ id: players.id, name: players.name })
+          .from(players)
+          .where(inArray(players.id, ownerIds))
+      : [];
+  const ownerNameById = new Map(ownerRows.map((o) => [o.id, o.name]));
+
   let gold = traveler.gold;
   const ownerGains = new Map<number, number>();
+  let travelerTollXp = 0;
+  const ownerXpGains = new Map<number, number>();
 
-  for (const wp of hitOrder) {
-    if (passed.has(wp.id)) continue;
-    if (gold < WAYPOINT_TOLL) break;
-    gold -= WAYPOINT_TOLL;
-    ownerGains.set(wp.ownerId, (ownerGains.get(wp.ownerId) ?? 0) + WAYPOINT_TOLL);
-    await db.insert(waypointPasses).values({
-      playerId,
-      buildingId: wp.id,
+  for (const { structure: b, at } of entries) {
+    const amount = b.amount;
+    if (amount <= 0) continue;
+    if (gold < amount) break;
+
+    gold -= amount;
+    ownerGains.set(b.ownerId, (ownerGains.get(b.ownerId) ?? 0) + amount);
+    const tollXp = xpForToll(amount);
+    travelerTollXp += tollXp;
+    ownerXpGains.set(
+      b.ownerId,
+      (ownerXpGains.get(b.ownerId) ?? 0) + tollXp,
+    );
+    await shareExploration(db, b.ownerId, playerId, mapId);
+
+    const ownerName = ownerNameById.get(b.ownerId) ?? "Unknown";
+    await logTollPaid(db, playerId, mapId, {
+      amount,
+      buildingType: b.type,
+      buildingName: b.name,
+      buildingId: b.id,
+      ownerId: b.ownerId,
+      ownerName,
+      at,
     });
-    await shareExploration(db, wp.ownerId, playerId, mapId);
+    await logTollReceived(db, b.ownerId, mapId, {
+      amount,
+      buildingType: b.type,
+      buildingName: b.name,
+      buildingId: b.id,
+      fromPlayerId: playerId,
+      fromPlayerName: traveler.name,
+      at,
+    });
   }
 
-  if (gold !== traveler.gold) {
+  if (gold !== traveler.gold || travelerTollXp > 0) {
     await db
       .update(players)
-      .set({ gold })
+      .set({
+        ...(gold !== traveler.gold ? { gold } : {}),
+        ...(travelerTollXp > 0
+          ? { xp: sql`${players.xp} + ${travelerTollXp}` }
+          : {}),
+      })
       .where(eq(players.id, playerId));
   }
-  for (const [ownerId, gain] of ownerGains) {
+  const ownerIdsSettled = new Set([
+    ...ownerGains.keys(),
+    ...ownerXpGains.keys(),
+  ]);
+  for (const ownerId of ownerIdsSettled) {
+    const gain = ownerGains.get(ownerId) ?? 0;
+    const xpGain = ownerXpGains.get(ownerId) ?? 0;
     await db
       .update(players)
-      .set({ gold: sql`${players.gold} + ${gain}` })
+      .set({
+        ...(gain > 0 ? { gold: sql`${players.gold} + ${gain}` } : {}),
+        ...(xpGain > 0 ? { xp: sql`${players.xp} + ${xpGain}` } : {}),
+      })
       .where(eq(players.id, ownerId));
   }
 }
@@ -202,14 +262,14 @@ export async function settleTravel(db: Db, playerId: number): Promise<void> {
   if (advance <= 0) return;
 
   const toIndex = fromIndex + advance;
-  const segment = path.slice(fromIndex + 1, toIndex + 1);
   const pos = path[toIndex]!;
   const goldGain = advance;
+  const xpGain = xpForSteps(advance);
+  const segment = path.slice(fromIndex + 1, toIndex + 1);
 
   const settledMs = last + advance * TRAVEL_SECONDS_PER_TILE * 1000;
   const finished = toIndex >= path.length - 1;
 
-  await settleWaypointsOnSegment(db, playerId, mapId, segment);
   await markExploredCells(
     db,
     playerId,
@@ -223,12 +283,26 @@ export async function settleTravel(db: Db, playerId: number): Promise<void> {
       x: pos.x,
       y: pos.y,
       gold: sql`${players.gold} + ${goldGain}`,
+      xp: sql`${players.xp} + ${xpGain}`,
       ...(finished ? { status: "idle" as const } : {}),
     })
     .where(eq(players.id, playerId));
 
+  await settleStructureTollsOnSegment(
+    db,
+    playerId,
+    mapId,
+    segment,
+    path[fromIndex] ?? null,
+  );
+
   if (finished) {
     await db.delete(travelJobs).where(eq(travelJobs.id, job.id));
+    await logTravelArrive(db, playerId, mapId, {
+      at: pos,
+      from: path[0],
+      to: path[path.length - 1],
+    });
   } else {
     await db
       .update(travelJobs)
@@ -290,6 +364,12 @@ export async function startTravel(
     cellsInVision(refreshed.x, refreshed.y),
     mapId,
   );
+
+  await logTravelStart(db, playerId, mapId, {
+    from: { x: refreshed.x, y: refreshed.y },
+    to,
+    steps,
+  });
 
   return {
     ok: true,
@@ -363,6 +443,12 @@ export async function startDirectionalTravel(
     mapId,
   );
 
+  await logTravelStart(db, playerId, mapId, {
+    from: { x: refreshed.x, y: refreshed.y },
+    to: path[path.length - 1]!,
+    steps: moved,
+  });
+
   return {
     ok: true,
     steps: moved,
@@ -370,26 +456,87 @@ export async function startDirectionalTravel(
   };
 }
 
-/** Client-authoritative stop: park at (x,y), clear travel job. */
+/** Client-authoritative stop: settle travel gold first, then park at (x,y). */
 export async function stopTravel(
   db: Db,
   playerId: number,
   x: number,
   y: number,
+  reason: StopReason = "manual",
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const player = await db.query.players.findFirst({
     where: eq(players.id, playerId),
   });
   if (!player) return { ok: false, error: "Player not found" };
 
+  // Award gold + XP per time-elapsed step before clearing the job
+  await settleTravel(db, playerId);
+
   const mapId = player.currentMapId ?? DEFAULT_MAP_ID;
   const pos = clampToMap(x, y);
-  await db.delete(travelJobs).where(eq(travelJobs.playerId, playerId));
+
+  const job = await db.query.travelJobs.findFirst({
+    where: eq(travelJobs.playerId, playerId),
+  });
+
+  let extraSteps = 0;
+  let pathFrom: Point | undefined;
+  let pathTo: Point | undefined;
+  let tollSegment: Point[] = [];
+  let tollPrevious: Point | null = null;
+  if (job) {
+    const path = JSON.parse(job.pathJson) as Point[];
+    pathFrom = path[0];
+    pathTo = path[path.length - 1];
+    let stopIdx = -1;
+    for (let i = job.pathIndex; i < path.length; i++) {
+      const cell = path[i]!;
+      if (cell.x === pos.x && cell.y === pos.y) {
+        stopIdx = i;
+        break;
+      }
+    }
+    if (stopIdx >= 0) {
+      extraSteps = Math.max(0, stopIdx - job.pathIndex);
+      tollSegment = path.slice(job.pathIndex + 1, stopIdx + 1);
+      tollPrevious = path[job.pathIndex] ?? null;
+    }
+    await db.delete(travelJobs).where(eq(travelJobs.id, job.id));
+  }
+
+  const extraXp = xpForSteps(extraSteps);
   await db
     .update(players)
-    .set({ x: pos.x, y: pos.y, status: "idle" })
+    .set({
+      x: pos.x,
+      y: pos.y,
+      status: "idle",
+      ...(extraSteps > 0
+        ? {
+            gold: sql`${players.gold} + ${extraSteps}`,
+            xp: sql`${players.xp} + ${extraXp}`,
+          }
+        : {}),
+    })
     .where(eq(players.id, playerId));
   await markExploredCells(db, playerId, cellsInVision(pos.x, pos.y), mapId);
+  await settleStructureTollsOnSegment(
+    db,
+    playerId,
+    mapId,
+    tollSegment,
+    tollPrevious,
+  );
+
+  // If settleTravel already finished the path, it logged arrive — skip here.
+  if (job) {
+    const endPayload = { at: pos, from: pathFrom, to: pathTo };
+    if (reason === "arrived") {
+      await logTravelArrive(db, playerId, mapId, endPayload);
+    } else {
+      await logTravelStop(db, playerId, mapId, endPayload);
+    }
+  }
 
   return { ok: true };
 }

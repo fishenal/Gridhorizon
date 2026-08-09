@@ -1,6 +1,7 @@
 import { CHUNK_SIZE, MAP_SIZE, WORLD_SEED } from "./constants";
 
-export type Terrain = "ocean" | "plain" | "mountain" | "snow" | "coast";
+/** Surface biomes (procedural; not stored in DB). */
+export type Terrain = "water" | "grass" | "forest" | "mountain" | "desert";
 export type ResourceType = "none" | "stone" | "wood" | "ore";
 
 export type TileInfo = {
@@ -34,6 +35,7 @@ function smoothNoise(x: number, y: number, seed: number, scale: number): number 
   return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
 }
 
+/** Combined elevation ~0..1.65 (mean ≈ 0.825). */
 function elevation(x: number, y: number, seed: number): number {
   const n1 = smoothNoise(x, y, seed, 180);
   const n2 = smoothNoise(x, y, seed + 17, 64) * 0.45;
@@ -41,17 +43,38 @@ function elevation(x: number, y: number, seed: number): number {
   return n1 + n2 + n3;
 }
 
+function moisture(x: number, y: number, seed: number): number {
+  return smoothNoise(x, y, seed + 200, 100);
+}
+
+function aridity(x: number, y: number, seed: number): number {
+  return smoothNoise(x, y, seed + 411, 120);
+}
+
 function inBounds(x: number, y: number): boolean {
   return x >= 0 && y >= 0 && x < MAP_SIZE && y < MAP_SIZE;
 }
 
-function isLandAt(x: number, y: number, seed: number): boolean {
-  if (!inBounds(x, y)) return false;
-  // ~1/3 land: threshold tuned around 0.58 on combined noise
-  return elevation(x, y, seed) > 0.58;
+/**
+ * Water = ocean (low elev) + inland lakes (moist depressions).
+ * Rough share: ~32–38% of map.
+ */
+function isWaterAt(x: number, y: number, seed: number): boolean {
+  if (!inBounds(x, y)) return true;
+  const elev = elevation(x, y, seed);
+  if (elev < 0.56) return true;
+  const moist = moisture(x, y, seed);
+  const lake = smoothNoise(x, y, seed + 333, 48);
+  // Compact inland lakes on mid-low land
+  if (elev < 0.74 && moist > 0.62 && lake > 0.82) return true;
+  return false;
 }
 
-function hasOceanNeighbor(x: number, y: number, seed: number): boolean {
+export function hasWaterNeighbor(
+  x: number,
+  y: number,
+  seed: number,
+): boolean {
   const dirs = [
     [1, 0],
     [-1, 0],
@@ -59,9 +82,9 @@ function hasOceanNeighbor(x: number, y: number, seed: number): boolean {
     [0, -1],
   ];
   for (const [dx, dy] of dirs) {
-    const nx = x + dx;
-    const ny = y + dy;
-    if (!inBounds(nx, ny) || !isLandAt(nx, ny, seed)) return true;
+    const nx = x + dx!;
+    const ny = y + dy!;
+    if (!inBounds(nx, ny) || isWaterAt(nx, ny, seed)) return true;
   }
   return false;
 }
@@ -72,36 +95,49 @@ export function generateTile(
   seed: number = WORLD_SEED,
 ): TileInfo {
   if (!inBounds(x, y)) {
-    return { x, y, isLand: false, terrain: "ocean", resourceType: "none" };
+    return { x, y, isLand: false, terrain: "water", resourceType: "none" };
   }
 
-  const land = isLandAt(x, y, seed);
-  if (!land) {
-    return { x, y, isLand: false, terrain: "ocean", resourceType: "none" };
+  if (isWaterAt(x, y, seed)) {
+    return { x, y, isLand: false, terrain: "water", resourceType: "none" };
   }
 
   const elev = elevation(x, y, seed);
-  const moist = smoothNoise(x, y, seed + 200, 90);
-  const coast = hasOceanNeighbor(x, y, seed);
+  const moist = moisture(x, y, seed);
+  const dry = aridity(x, y, seed);
+  const shore = hasWaterNeighbor(x, y, seed);
 
-  let terrain: Terrain = "plain";
-  if (elev > 0.82) terrain = "mountain";
-  else if (moist < 0.32 && elev > 0.7) terrain = "snow";
-  else if (coast) terrain = "coast";
-  else terrain = "plain";
+  // Land biome mix (of land ≈ 62–68% of map):
+  // mountain ~12%, forest ~28%, desert/beach ~18%, grass ~42%
+  let terrain: Terrain = "grass";
+  if (elev > 0.95) {
+    terrain = "mountain";
+  } else if (shore && (elev < 0.7 || dry > 0.45)) {
+    // Beach / lakeside sand
+    terrain = "desert";
+  } else if (dry > 0.62 && moist < 0.42 && elev < 0.9) {
+    terrain = "desert";
+  } else if (moist > 0.52 && elev < 0.92) {
+    terrain = "forest";
+  } else {
+    terrain = "grass";
+  }
 
   let resourceType: ResourceType = "none";
   const r = hash2(x, y, seed + 777);
-  if (terrain === "mountain" && r > 0.55) resourceType = "ore";
-  else if (terrain === "plain" && r > 0.72) resourceType = "wood";
-  else if ((terrain === "plain" || terrain === "coast") && r > 0.85)
-    resourceType = "stone";
-  else if (terrain === "snow" && r > 0.7) resourceType = "stone";
+  if (terrain === "mountain" && r > 0.5) resourceType = "ore";
+  else if (terrain === "forest" && r > 0.62) resourceType = "wood";
+  else if (terrain === "grass" && r > 0.88) resourceType = "wood";
+  else if (terrain === "desert" && r > 0.8) resourceType = "stone";
+  else if (terrain === "mountain" && r > 0.35) resourceType = "stone";
 
   return { x, y, isLand: true, terrain, resourceType };
 }
 
-export function chunkCoords(x: number, y: number): { cx: number; cy: number; lx: number; ly: number } {
+export function chunkCoords(
+  x: number,
+  y: number,
+): { cx: number; cy: number; lx: number; ly: number } {
   const cx = Math.floor(x / CHUNK_SIZE);
   const cy = Math.floor(y / CHUNK_SIZE);
   const lx = x - cx * CHUNK_SIZE;

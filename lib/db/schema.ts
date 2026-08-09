@@ -40,7 +40,15 @@ export const players = pgTable("players", {
   ore: integer("ore").notNull().default(0),
   food: integer("food").notNull().default(20),
   status: text("status").notNull().default("idle"), // idle | traveling
+  /** Player avatar emoji (shown on map; boat on water overrides display). */
+  emoji: text("emoji").notNull().default("🙂"),
+  /** Short speech bubble over avatar; empty = hidden. Max 300 chars enforced in API. */
+  bubble: text("bubble").notNull().default(""),
   economySettledAt: timestamp("economy_settled_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  /** Touched on authenticated activity; used for online presence. */
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true })
@@ -108,9 +116,15 @@ export const buildings = pgTable(
     ownerId: integer("owner_id")
       .notNull()
       .references(() => players.id, { onDelete: "cascade" }),
-    type: text("type").notNull(), // mine | farm | fishery | town | waypoint
+    /** flag | town | mine | farm | fishery | waypoint (legacy) */
+    type: text("type").notNull(),
     level: integer("level").notNull().default(1),
+    /** Display name for flag / town */
+    name: text("name"),
     message: text("message"),
+    /** Influence radius for toll (Chebyshev); charged when travelers enter range */
+    tollRadius: integer("toll_radius"),
+    tollAmount: integer("toll_amount"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -216,6 +230,30 @@ export const waypointPasses = pgTable(
   (t) => [uniqueIndex("waypoint_pass_unique").on(t.playerId, t.buildingId)],
 );
 
+/** Append-only player activity feed (travel, build, future tolls, etc.). */
+export const activityLogs = pgTable(
+  "activity_logs",
+  {
+    id: serial("id").primaryKey(),
+    playerId: integer("player_id")
+      .notNull()
+      .references(() => players.id, { onDelete: "cascade" }),
+    mapId: integer("map_id")
+      .notNull()
+      .default(1)
+      .references(() => maps.id),
+    /** Open string: travel_start | travel_stop | travel_arrive | build | … */
+    type: text("type").notNull(),
+    /** JSON payload for the event */
+    payload: text("payload").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("activity_logs_player_created_idx").on(t.playerId, t.createdAt)],
+);
+
 export type MapRow = typeof maps.$inferSelect;
 export type Player = typeof players.$inferSelect;
 export type Building = typeof buildings.$inferSelect;
+export type ActivityLog = typeof activityLogs.$inferSelect;

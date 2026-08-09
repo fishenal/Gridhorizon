@@ -39,7 +39,8 @@ export function MovePad({
 }: Props) {
   const [dx, setDx] = useState(0);
   const [dy, setDy] = useState(-1);
-  const [steps, setSteps] = useState(10);
+  /** String draft so clearing the field does not coerce to 0. */
+  const [stepsText, setStepsText] = useState("10");
   const [submitting, setSubmitting] = useState(false);
   const [stepsError, setStepsError] = useState("");
 
@@ -47,15 +48,16 @@ export function MovePad({
 
   async function handleMove() {
     if ((dx === 0 && dy === 0) || locked) return;
-    const n = Number(steps);
+    const n = Number.parseInt(stepsText.trim(), 10);
     if (!Number.isFinite(n) || n < 1 || n > MAX_TRAVEL_STEPS) {
-      setStepsError(`步数须为 1–${MAX_TRAVEL_STEPS}`);
+      setStepsError(`Steps must be 1–${MAX_TRAVEL_STEPS}`);
       return;
     }
     setStepsError("");
+    setStepsText(String(n));
     setSubmitting(true);
     try {
-      await onMove(dx, dy, Math.floor(n));
+      await onMove(dx, dy, n);
     } finally {
       setSubmitting(false);
     }
@@ -94,7 +96,7 @@ export function MovePad({
             onClick={onStop}
             className="w-full rounded-lg border border-stone-300 bg-white py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50"
           >
-            终止
+            Stop
           </button>
         </div>
       ) : null}
@@ -105,21 +107,29 @@ export function MovePad({
             return (
               <input
                 key="steps"
-                type="number"
-                min={1}
-                max={MAX_TRAVEL_STEPS}
-                value={steps}
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={stepsText}
                 disabled={locked}
                 onChange={(e) => {
-                  setSteps(Number(e.target.value));
+                  const next = e.target.value.replace(/\D/g, "");
+                  setStepsText(next);
                   setStepsError("");
+                }}
+                onBlur={() => {
+                  if (stepsText === "") return;
+                  const n = Number.parseInt(stepsText, 10);
+                  if (Number.isFinite(n) && n >= 1) {
+                    setStepsText(String(n));
+                  }
                 }}
                 className={`h-10 w-full rounded border bg-white text-center text-sm tabular-nums disabled:opacity-50 ${
                   stepsError
                     ? "border-rose-400"
                     : "border-stone-300"
                 }`}
-                aria-label="移动格数"
+                aria-label="Travel steps"
               />
             );
           }
@@ -138,7 +148,7 @@ export function MovePad({
                   ? "border-pink-500 bg-pink-100 text-pink-700"
                   : "border-stone-200 bg-stone-50 text-stone-700 hover:bg-stone-100"
               }`}
-              aria-label={`方向 ${d.label}`}
+              aria-label={`Direction ${d.label}`}
             >
               {d.label}
             </button>

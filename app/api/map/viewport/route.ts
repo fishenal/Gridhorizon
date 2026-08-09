@@ -1,8 +1,14 @@
-import { and, eq, gte, lte, ne, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, lte, ne, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { getDb } from "@/lib/db";
 import { buildings, players, tileClaims } from "@/lib/db/schema";
+import {
+  FLAG_RANGE_RADIUS,
+  normalizeBubble,
+  normalizePlayerEmoji,
+} from "@/lib/game/playerStyle";
+import { isOnlineFromLastSeen } from "@/lib/game/presence";
 import { VISION_RADIUS } from "@/lib/map/constants";
 import { loadExploredSet } from "@/lib/map/explore";
 import { generateTile } from "@/lib/map/generator";
@@ -74,6 +80,20 @@ export async function GET(req: Request) {
         ),
       );
 
+    const ownerIds = [...new Set(overlayBuildings.map((b) => b.ownerId))];
+    const ownerRows =
+      ownerIds.length === 0
+        ? []
+        : await db
+            .select({
+              id: players.id,
+              name: players.name,
+              emoji: players.emoji,
+            })
+            .from(players)
+            .where(inArray(players.id, ownerIds));
+    const ownerById = new Map(ownerRows.map((o) => [o.id, o]));
+
     const claims = await db
       .select()
       .from(tileClaims)
@@ -91,8 +111,11 @@ export async function GET(req: Request) {
       .select({
         id: players.id,
         name: players.name,
+        emoji: players.emoji,
+        bubble: players.bubble,
         x: players.x,
         y: players.y,
+        lastSeenAt: players.lastSeenAt,
       })
       .from(players)
       .where(
@@ -146,8 +169,21 @@ export async function GET(req: Request) {
                 id: b.id,
                 type: b.type,
                 ownerId: b.ownerId,
+                ownerName: ownerById.get(b.ownerId)?.name ?? `#${b.ownerId}`,
+                ownerEmoji: normalizePlayerEmoji(
+                  ownerById.get(b.ownerId)?.emoji,
+                ),
                 level: b.level,
+                name: b.name,
                 message: b.message,
+                createdAt: b.createdAt.toISOString(),
+                tollRadius:
+                  b.tollRadius ??
+                  (b.type === "flag" ||
+                  b.type === "waypoint" ||
+                  b.type === "town"
+                    ? FLAG_RANGE_RADIUS
+                    : null),
               }
             : null,
           claim: c
@@ -165,12 +201,27 @@ export async function GET(req: Request) {
 
     return NextResponse.json({
       center: { x: cx, y: cy },
-      player: { x: me.x, y: me.y, name: me.name, id: me.id },
+      player: {
+        x: me.x,
+        y: me.y,
+        name: me.name,
+        id: me.id,
+        emoji: normalizePlayerEmoji(me.emoji),
+        bubble: normalizeBubble(me.bubble),
+      },
       visionRadius: visionR,
       viewRadius: viewR,
       mapId,
       tiles,
-      players: visibleOthers,
+      players: visibleOthers.map((p) => {
+        const { lastSeenAt, ...rest } = p;
+        return {
+          ...rest,
+          emoji: normalizePlayerEmoji(p.emoji),
+          bubble: normalizeBubble(p.bubble),
+          online: isOnlineFromLastSeen(lastSeenAt),
+        };
+      }),
     });
   } catch (err) {
     console.error("[api/map/viewport]", err);

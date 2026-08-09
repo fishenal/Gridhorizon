@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Gridhorizon",
-  description: "异步开放世界探索概念版",
+  description: "Asynchronous open-world exploration prototype",
 };
 
 export default function RootLayout({
@@ -25,7 +25,7 @@ export default function RootLayout({
 }>) {
   return (
     <html
-      lang="zh-CN"
+      lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-[radial-gradient(ellipse_at_top,_#e8f5f2_0%,_#f5f0e8_45%,_#ebe4d6_100%)] text-stone-900">

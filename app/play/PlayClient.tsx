@@ -1,8 +1,8 @@
 "use client";
 
 import { signOut } from "next-auth/react";
+import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Hud } from "@/components/game/Hud";
 import {
   MapCanvas,
   type ScreenAnchors,
@@ -11,8 +11,26 @@ import {
 } from "@/components/game/MapCanvas";
 import { MovePad, type TravelProgress } from "@/components/game/MovePad";
 import { Minimap } from "@/components/game/Minimap";
-import { UserCard } from "@/components/game/UserCard";
+import { OnlinePlayers, type OnlinePlayer } from "@/components/game/OnlinePlayers";
+import { PlayerStatusPanel } from "@/components/game/PlayerStatusPanel";
+import {
+  PlayerProfileModal,
+  type PlayerProfileTarget,
+} from "@/components/game/PlayerProfileModal";
+import { UserCard, FlagCard, TownCard, BuildNameDialog, type BuildKind } from "@/components/game/UserCard";
+import { MapPointPopup } from "@/components/game/MapPointPopup";
+import { generateTile } from "@/lib/map/generator";
+import {
+  FLAG_RANGE_RADIUS,
+  normalizeBubble,
+  normalizePlayerEmoji,
+} from "@/lib/game/playerStyle";
 import { ZoomSlider } from "@/components/game/ZoomSlider";
+import {
+  JournalPanel,
+  makeLocalActivity,
+  type ActivityEntry,
+} from "@/components/game/JournalPanel";
 import { buildDirectionalPath, type Point } from "@/lib/game/path";
 import {
   ingestExploredFromTiles,
@@ -21,7 +39,35 @@ import {
   rebuildLocalViewportTiles,
   type TileOverlay,
 } from "@/lib/map/localFog";
-import { VISION_RADIUS, WORLD_SEED } from "@/lib/map/constants";
+import { VISION_RADIUS, WORLD_SEED, WAYPOINT_TOLL, XP_BUILD, XP_PER_STEP } from "@/lib/map/constants";
+import {
+  isSpacedStructureType,
+  isTooCloseToAnyStructure,
+  STRUCTURE_TOO_CLOSE_MSG,
+} from "@/lib/game/structureSpacing";
+import {
+  defaultTollRadius,
+  findTollEntries,
+  type TollStructure,
+} from "@/lib/game/structureToll";
+import { xpForToll } from "@/lib/game/xp";
+import {
+  isMapRealtimeMessage,
+  mapChannelName,
+  type BuildMessage,
+  type PresenceMember,
+} from "@/lib/ably/channels";
+import { closeAblyClient, getAblyClient } from "@/lib/ably/client";
+import {
+  markMapOtherOffline,
+  mergeViewportPlayers,
+  patchMapOtherBubble,
+  presenceToOnline,
+  removeOnlinePlayer,
+  upsertMapOther,
+  upsertOnlinePlayer,
+} from "@/lib/ably/merge";
+import type { RealtimeChannel } from "ably";
 
 type MeResponse = {
   player: {
@@ -36,6 +82,9 @@ type MeResponse = {
     ore: number;
     food: number;
     status: string;
+    emoji: string;
+    bubble?: string;
+    currentMapId?: number;
   };
   travel: {
     pathIndex: number;
@@ -46,6 +95,7 @@ type MeResponse = {
     target: { x: number; y: number };
   } | null;
   friends: Array<{ id: number; name: string; x: number; y: number }>;
+  map?: { id: number; slug: string; name: string; seed: number; size: number };
   config: {
     travelSecondsPerTile: number;
     worldSeed: number;
@@ -55,29 +105,21 @@ type MeResponse = {
 
 type ViewportResponse = {
   center: { x: number; y: number };
-  player: { x: number; y: number; id: number; name: string };
+  player: { x: number; y: number; id: number; name: string; emoji?: string };
   visionRadius: number;
   tiles: ViewportTile[];
-  players: Array<{ id: number; name: string; x: number; y: number }>;
+  players: Array<{
+    id: number;
+    name: string;
+    x: number;
+    y: number;
+    emoji?: string;
+    bubble?: string;
+    online?: boolean;
+  }>;
 };
 
 type Selection = SelectedEntity | null;
-
-function clampPopup(
-  left: number,
-  top: number,
-  width: number,
-  height: number,
-  containerW: number,
-  containerH: number,
-) {
-  const maxLeft = Math.max(8, containerW - width - 8);
-  const maxTop = Math.max(8, containerH - height - 8);
-  return {
-    left: Math.max(8, Math.min(left, maxLeft)),
-    top: Math.max(8, Math.min(top, maxTop)),
-  };
-}
 
 async function readJson<T>(res: Response): Promise<T | null> {
   const text = await res.text();
@@ -108,6 +150,9 @@ export default function PlayClient() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [traveling, setTraveling] = useState(false);
+  const [pendingBuild, setPendingBuild] = useState<BuildKind | null>(null);
+  const [profileTarget, setProfileTarget] =
+    useState<PlayerProfileTarget | null>(null);
   const [travelProgress, setTravelProgress] = useState<TravelProgress | null>(
     null,
   );
@@ -132,6 +177,7 @@ export default function PlayClient() {
   >(() => {});
   const displayPosRef = useRef<Point | null>(null);
   const playerIdRef = useRef<number | null>(null);
+  const goldRef = useRef(0);
   const exploredRef = useRef<Set<string>>(new Set());
   const overlaysRef = useRef<Map<string, TileOverlay>>(new Map());
   const worldSeedRef = useRef(WORLD_SEED);
@@ -140,11 +186,69 @@ export default function PlayClient() {
   const [mapZoomLevel, setMapZoomLevel] = useState(0);
   const mapZoomLevelRef = useRef(0);
   const [exploredRevision, setExploredRevision] = useState(0);
+  const [journalTick, setJournalTick] = useState(0);
+  const [localLogs, setLocalLogs] = useState<ActivityEntry[]>([]);
+  const [onlinePlayers, setOnlinePlayers] = useState<OnlinePlayer[]>([]);
+  const localLogSeqRef = useRef(0);
   const hoverCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const ablyReadyRef = useRef(false);
+  const ablyPresentIdsRef = useRef<Set<number>>(new Set());
+  const ablyChannelRef = useRef<RealtimeChannel | null>(null);
+  const meMetaRef = useRef<{
+    id: number;
+    name: string;
+    emoji: string;
+    bubble: string;
+    mapId: number;
+  } | null>(null);
+  const softRefreshRef = useRef<() => void>(() => {});
+  const publishRealtimeRef = useRef<{
+    publishPos: (pos: Point, status: string) => void;
+    publishBubble: (bubble: string) => void;
+    publishBuild: (msg: Omit<BuildMessage, "type">) => void;
+    publishToll: (toPlayerId: number, amount: number) => void;
+  } | null>(null);
 
-  const HOVER_CLOSE_MS = 180;
+  const pushLocalLog = useCallback(
+    (type: string, payload: Record<string, unknown>) => {
+      localLogSeqRef.current += 1;
+      const id = -localLogSeqRef.current;
+      const entry = makeLocalActivity(type, payload, id);
+      setLocalLogs((prev) => [entry, ...prev].slice(0, 50));
+      return id;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!me?.player) return;
+    meMetaRef.current = {
+      id: me.player.id,
+      name: me.player.name,
+      emoji: normalizePlayerEmoji(me.player.emoji),
+      bubble: normalizeBubble(me.player.bubble),
+      mapId: me.player.currentMapId ?? me.map?.id ?? 1,
+    };
+  }, [
+    me?.player.id,
+    me?.player.name,
+    me?.player.emoji,
+    me?.player.bubble,
+    me?.player.currentMapId,
+    me?.map?.id,
+  ]);
+
+  const removeLocalLog = useCallback((id: number) => {
+    setLocalLogs((prev) => prev.filter((e) => e.id !== id));
+  }, []);
+
+  const onLocalLogsMatched = useCallback((ids: number[]) => {
+    if (ids.length === 0) return;
+    const drop = new Set(ids);
+    setLocalLogs((prev) => prev.filter((e) => !drop.has(e.id)));
+  }, []);
 
   const cancelCloseEntity = useCallback(() => {
     if (hoverCloseTimerRef.current) {
@@ -158,28 +262,19 @@ export default function PlayClient() {
     hoverCloseTimerRef.current = setTimeout(() => {
       hoverCloseTimerRef.current = null;
       setSelection(null);
-    }, HOVER_CLOSE_MS);
+    }, 180);
   }, [cancelCloseEntity]);
 
-  const openEntity = useCallback(
-    (entity: SelectedEntity) => {
-      cancelCloseEntity();
-      setSelection(entity);
+  const onPointSelect = useCallback(
+    (point: SelectedEntity | null) => {
+      if (point) {
+        cancelCloseEntity();
+        setSelection(point);
+      } else {
+        scheduleCloseEntity();
+      }
     },
-    [cancelCloseEntity],
-  );
-
-  const closeEntity = useCallback(() => {
-    cancelCloseEntity();
-    setSelection(null);
-  }, [cancelCloseEntity]);
-
-  const onEntityHoverChange = useCallback(
-    (entity: SelectedEntity | null) => {
-      if (entity) openEntity(entity);
-      else scheduleCloseEntity();
-    },
-    [openEntity, scheduleCloseEntity],
+    [cancelCloseEntity, scheduleCloseEntity],
   );
 
   useEffect(() => {
@@ -207,6 +302,132 @@ export default function PlayClient() {
     });
   }, []);
 
+  /** Client-side spacing check against known map overlays (server still authoritative). */
+  const localTooCloseToStructure = useCallback((x: number, y: number) => {
+    const nearby: Point[] = [];
+    for (const [key, overlay] of overlaysRef.current) {
+      const b = overlay.building;
+      if (!b || !isSpacedStructureType(b.type)) continue;
+      const comma = key.indexOf(",");
+      if (comma < 0) continue;
+      const sx = Number(key.slice(0, comma));
+      const sy = Number(key.slice(comma + 1));
+      if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+      nearby.push({ x: sx, y: sy });
+    }
+    return isTooCloseToAnyStructure(x, y, nearby);
+  }, []);
+
+  const trySelectBuild = useCallback(
+    (kind: BuildKind) => {
+      if (!me || travelingRef.current) return;
+      // UserCard already shows the live too-close hint; don't sticky-banner it.
+      if (localTooCloseToStructure(me.player.x, me.player.y)) return;
+      setError("");
+      setPendingBuild(kind);
+    },
+    [localTooCloseToStructure, me],
+  );
+
+  /** Known flag/town/waypoint overlays for local toll preview. */
+  const collectLocalTollStructures = useCallback((): TollStructure[] => {
+    const out: TollStructure[] = [];
+    for (const [key, overlay] of overlaysRef.current) {
+      const b = overlay.building;
+      if (!b || !isSpacedStructureType(b.type) || b.id <= 0) continue;
+      const comma = key.indexOf(",");
+      if (comma < 0) continue;
+      const sx = Number(key.slice(0, comma));
+      const sy = Number(key.slice(comma + 1));
+      if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+      out.push({
+        id: b.id,
+        x: sx,
+        y: sy,
+        radius: defaultTollRadius(b.tollRadius),
+        ownerId: b.ownerId,
+        type: b.type,
+        name: b.name ?? null,
+        amount: WAYPOINT_TOLL,
+        ownerName: b.ownerName,
+      });
+    }
+    return out;
+  }, []);
+
+  /** Instant gold + settle journal when stepping into influence. */
+  const applyLocalTollEntries = useCallback(
+    (previous: Point, next: Point) => {
+      const travelerId = playerIdRef.current;
+      if (!travelerId) return;
+      const entries = findTollEntries(
+        previous,
+        [next],
+        collectLocalTollStructures(),
+        travelerId,
+      );
+      if (entries.length === 0) return;
+
+      // Optimistic gold + XP only — log comes from server after settle.
+      let gold = goldRef.current;
+      let tollXp = 0;
+      const ownerNotices: Array<{ ownerId: number; amount: number }> = [];
+      for (const { structure: b } of entries) {
+        if (b.amount <= 0 || gold < b.amount) break;
+        gold -= b.amount;
+        tollXp += xpForToll(b.amount);
+        ownerNotices.push({ ownerId: b.ownerId, amount: b.amount });
+      }
+      if (gold === goldRef.current && tollXp === 0) return;
+
+      goldRef.current = gold;
+      setMe((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          player: {
+            ...prev.player,
+            gold,
+            xp: prev.player.xp + tollXp,
+          },
+        };
+      });
+
+      // Settle path on server now so toll_paid / toll_received land immediately.
+      void (async () => {
+        try {
+          const res = await fetch("/api/me");
+          if (!res.ok) return;
+          const data = await readJson<MeResponse>(res);
+          if (data?.player && typeof data.player.gold === "number") {
+            goldRef.current = data.player.gold;
+            setMe((prev) => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                player: {
+                  ...prev.player,
+                  gold: data.player.gold,
+                  xp:
+                    typeof data.player.xp === "number"
+                      ? data.player.xp
+                      : prev.player.xp,
+                },
+              };
+            });
+          }
+          for (const n of ownerNotices) {
+            publishRealtimeRef.current?.publishToll(n.ownerId, n.amount);
+          }
+          setJournalTick((t) => t + 1);
+        } catch {
+          // soft — stop/arrive settle will catch up
+        }
+      })();
+    },
+    [collectLocalTollStructures],
+  );
+
   const syncExploredAt = useCallback(
     async (pos: Point) => {
       const seq = ++exploredSyncSeqRef.current;
@@ -232,8 +453,8 @@ export default function PlayClient() {
           }
         }
 
-        let players = undefined as
-          | Array<{ id: number; name: string; x: number; y: number }>
+        let httpPlayers:
+          | ViewportResponse["players"]
           | undefined;
         if (vpRes.ok) {
           const vpData = await readJson<ViewportResponse>(vpRes);
@@ -242,7 +463,7 @@ export default function PlayClient() {
             for (const [k, v] of overlaysFromTiles(vpData.tiles)) {
               overlaysRef.current.set(k, v);
             }
-            players = vpData.players;
+            httpPlayers = vpData.players;
             setExploredRevision((n) => n + 1);
           }
         }
@@ -253,12 +474,25 @@ export default function PlayClient() {
         const tiles = rebuildFogAt(live);
         setViewport((prev) => {
           if (!prev) return prev;
+          const nextPlayers =
+            httpPlayers == null
+              ? prev.players
+              : ablyReadyRef.current
+                ? mergeViewportPlayers({
+                    ablyIds: ablyPresentIdsRef.current,
+                    ablyPlayers: prev.players,
+                    httpPlayers,
+                    selfId: playerIdRef.current ?? -1,
+                    selfPos: live,
+                    visionRadius: visionRadiusRef.current,
+                  })
+                : httpPlayers;
           return {
             ...prev,
             center: { x: live.x, y: live.y },
             player: { ...prev.player, x: live.x, y: live.y },
             tiles,
-            players: players ?? prev.players,
+            players: nextPlayers,
           };
         });
       } catch {
@@ -332,10 +566,17 @@ export default function PlayClient() {
         if (prev.id !== playerIdRef.current) return prev;
         return { ...prev, x: pos.x, y: pos.y };
       });
+      // Drop sticky spacing banner once the player leaves the blocked zone.
+      if (!localTooCloseToStructure(pos.x, pos.y)) {
+        setError((prev) =>
+          prev === STRUCTURE_TOO_CLOSE_MSG ? "" : prev,
+        );
+      }
       setExploredRevision((n) => n + 1);
       void syncExploredAt(pos);
+      publishRealtimeRef.current?.publishPos(pos, status);
     },
-    [rebuildFogAt, syncExploredAt],
+    [rebuildFogAt, syncExploredAt, localTooCloseToStructure],
   );
 
   const updateTravelProgress = useCallback((index: number, pathLen: number) => {
@@ -374,16 +615,21 @@ export default function PlayClient() {
   }, []);
 
   const mapPlayer = useMemo(() => {
-    if (!viewport) return null;
+    if (!viewport || !me) return null;
     return {
-      id: viewport.player.id,
-      name: viewport.player.name,
+      id: me.player.id,
+      name: me.player.name,
       x: viewport.player.x,
       y: viewport.player.y,
+      emoji: normalizePlayerEmoji(me.player.emoji),
+      bubble: normalizeBubble(me.player.bubble),
+      online: true,
     };
   }, [
-    viewport?.player.id,
-    viewport?.player.name,
+    me?.player.id,
+    me?.player.name,
+    me?.player.emoji,
+    me?.player.bubble,
     viewport?.player.x,
     viewport?.player.y,
   ]);
@@ -417,7 +663,7 @@ export default function PlayClient() {
       const meRes = await fetch("/api/me");
       if (seq !== refreshSeqRef.current) return;
       if (meRes.status === 401) {
-        window.location.href = "/login";
+        window.location.href = "/";
         return;
       }
       if (!meRes.ok) return;
@@ -426,6 +672,7 @@ export default function PlayClient() {
       if (seq !== refreshSeqRef.current) return;
 
       playerIdRef.current = meData.player.id;
+      goldRef.current = meData.player.gold;
       worldSeedRef.current = meData.config.worldSeed ?? worldSeedRef.current;
       visionRadiusRef.current =
         meData.config.visionRadius ?? visionRadiusRef.current;
@@ -465,6 +712,7 @@ export default function PlayClient() {
         // Keep travel payload only until local timer owns the trip
         travel: travelingRef.current || resumeTravel ? meData.travel : null,
         config: meData.config,
+        map: meData.map ?? prev?.map,
       }));
 
       const [vpRes, exploredRes] = await Promise.all([
@@ -501,7 +749,7 @@ export default function PlayClient() {
       const live = displayPosRef.current ?? display;
       const tiles = rebuildFogAt(live);
 
-      setViewport({
+      setViewport((prev) => ({
         center: { x: live.x, y: live.y },
         player: {
           id: vpData.player.id,
@@ -511,27 +759,40 @@ export default function PlayClient() {
         },
         visionRadius: visionRadiusRef.current,
         tiles,
-        players: vpData.players,
-      });
+        players: ablyReadyRef.current
+          ? mergeViewportPlayers({
+              ablyIds: ablyPresentIdsRef.current,
+              ablyPlayers: prev?.players ?? [],
+              httpPlayers: vpData.players,
+              selfId: meData.player.id,
+              selfPos: live,
+              visionRadius: visionRadiusRef.current,
+            })
+          : vpData.players,
+      }));
 
       if (!travelingRef.current) {
-        setSelection((prev) => {
-          if (!prev || prev.type !== "player") return prev;
-          if (prev.id === meData.player.id) {
+        setSelection((sel) => {
+          if (!sel || sel.type !== "player") return sel;
+          if (sel.id === meData.player.id) {
             return {
-              ...prev,
+              ...sel,
               x: live.x,
               y: live.y,
               name: meData.player.name,
             };
           }
-          const other = vpData.players.find((p) => p.id === prev.id);
-          if (!other) return prev;
+          if (ablyPresentIdsRef.current.has(sel.id)) {
+            return { ...sel, online: true };
+          }
+          const other = vpData.players.find((p) => p.id === sel.id);
+          if (!other) return sel;
           return {
-            ...prev,
+            ...sel,
             x: other.x,
             y: other.y,
             name: other.name,
+            online: other.online ?? false,
           };
         });
       }
@@ -549,10 +810,15 @@ export default function PlayClient() {
           true,
         );
       }
+      setJournalTick((t) => t + 1);
     } catch {
       // soft sync — ignore network blips
     }
   }, [rebuildFogAt]);
+
+  softRefreshRef.current = () => {
+    void softRefresh();
+  };
 
   useEffect(() => {
     void softRefresh();
@@ -560,16 +826,336 @@ export default function PlayClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Ably realtime: presence + map channel (degrades silently if unavailable)
+  useEffect(() => {
+    if (!me?.player?.id) return;
+    const mapId = me.player.currentMapId ?? me.map?.id;
+    if (!mapId) return;
+
+    let cancelled = false;
+    const selfId = me.player.id;
+    const channelName = mapChannelName(mapId);
+
+    const applyPresenceMember = (raw: unknown, action: string) => {
+      if (!raw || typeof raw !== "object") return;
+      const data = raw as Partial<PresenceMember>;
+      if (typeof data.id !== "number" || data.id === selfId) return;
+      const member: PresenceMember = {
+        id: data.id,
+        name: typeof data.name === "string" ? data.name : `#${data.id}`,
+        emoji: normalizePlayerEmoji(data.emoji),
+        bubble: normalizeBubble(data.bubble),
+        x: typeof data.x === "number" ? data.x : 0,
+        y: typeof data.y === "number" ? data.y : 0,
+        status: typeof data.status === "string" ? data.status : "idle",
+      };
+      if (action === "leave" || action === "absent") {
+        ablyPresentIdsRef.current.delete(member.id);
+        setOnlinePlayers((prev) => removeOnlinePlayer(prev, member.id));
+        setViewport((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            players: markMapOtherOffline(prev.players, member.id),
+          };
+        });
+        return;
+      }
+      ablyPresentIdsRef.current.add(member.id);
+      setOnlinePlayers((prev) =>
+        upsertOnlinePlayer(prev, presenceToOnline(member)),
+      );
+      const selfPos = displayPosRef.current ?? {
+        x: member.x,
+        y: member.y,
+      };
+      setViewport((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          players: upsertMapOther(
+            prev.players,
+            { ...member, online: true },
+            selfId,
+            selfPos,
+            visionRadiusRef.current,
+          ),
+        };
+      });
+    };
+
+    const onMessage = (message: { data?: unknown }) => {
+      if (!isMapRealtimeMessage(message.data)) return;
+      const msg = message.data;
+      if (msg.type === "pos") {
+        if (msg.playerId === selfId) return;
+        setOnlinePlayers((prev) =>
+          upsertOnlinePlayer(prev, {
+            id: msg.playerId,
+            name: msg.name,
+            emoji: normalizePlayerEmoji(msg.emoji),
+            x: msg.x,
+            y: msg.y,
+            status: msg.status,
+          }),
+        );
+        ablyPresentIdsRef.current.add(msg.playerId);
+        const selfPos = displayPosRef.current ?? { x: msg.x, y: msg.y };
+        setViewport((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            players: upsertMapOther(
+              prev.players,
+              {
+                id: msg.playerId,
+                name: msg.name,
+                x: msg.x,
+                y: msg.y,
+                emoji: msg.emoji,
+                bubble: msg.bubble,
+                online: true,
+              },
+              selfId,
+              selfPos,
+              visionRadiusRef.current,
+            ),
+          };
+        });
+        return;
+      }
+      if (msg.type === "bubble") {
+        if (msg.playerId === selfId) return;
+        setViewport((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            players: patchMapOtherBubble(
+              prev.players,
+              msg.playerId,
+              msg.bubble,
+            ),
+          };
+        });
+        return;
+      }
+      if (msg.type === "build") {
+        overlaysRef.current.set(`${msg.x},${msg.y}`, {
+          building: {
+            id: msg.buildingId ?? -1,
+            type: msg.buildingType,
+            ownerId: msg.ownerId,
+            ownerName: msg.ownerName,
+            ownerEmoji: normalizePlayerEmoji(msg.ownerEmoji),
+            level: 1,
+            name: msg.name,
+            message: msg.name,
+            createdAt: new Date().toISOString(),
+            tollRadius: msg.tollRadius,
+          },
+          claim: overlaysRef.current.get(`${msg.x},${msg.y}`)?.claim ?? null,
+        });
+        const pos = displayPosRef.current;
+        if (pos) {
+          const tiles = rebuildFogAt(pos);
+          setViewport((prev) => (prev ? { ...prev, tiles } : prev));
+          setExploredRevision((n) => n + 1);
+        }
+        return;
+      }
+      if (msg.type === "toll") {
+        if (msg.toPlayerId !== selfId) return;
+        setJournalTick((t) => t + 1);
+        softRefreshRef.current();
+      }
+    };
+
+    void (async () => {
+      const client = getAblyClient();
+      if (!client || cancelled) return;
+
+      const channel = client.channels.get(channelName);
+      ablyChannelRef.current = channel;
+
+      publishRealtimeRef.current = {
+        publishPos: (pos, status) => {
+          const meta = meMetaRef.current;
+          if (!meta || !ablyReadyRef.current) return;
+          const payload: PresenceMember = {
+            id: meta.id,
+            name: meta.name,
+            emoji: meta.emoji,
+            bubble: meta.bubble,
+            x: pos.x,
+            y: pos.y,
+            status,
+          };
+          try {
+            void channel.presence.update(payload);
+            void channel.publish("pos", {
+              type: "pos",
+              playerId: meta.id,
+              name: meta.name,
+              emoji: meta.emoji,
+              bubble: meta.bubble,
+              x: pos.x,
+              y: pos.y,
+              status,
+            });
+          } catch {
+            // ignore publish errors
+          }
+        },
+        publishBubble: (bubble) => {
+          const meta = meMetaRef.current;
+          if (!meta || !ablyReadyRef.current) return;
+          const text = normalizeBubble(bubble);
+          const pos = displayPosRef.current ?? { x: 0, y: 0 };
+          const payload: PresenceMember = {
+            id: meta.id,
+            name: meta.name,
+            emoji: meta.emoji,
+            bubble: text,
+            x: pos.x,
+            y: pos.y,
+            status: travelingRef.current ? "traveling" : "idle",
+          };
+          try {
+            void channel.presence.update(payload);
+            void channel.publish("bubble", {
+              type: "bubble",
+              playerId: meta.id,
+              bubble: text,
+            });
+          } catch {
+            // ignore
+          }
+        },
+        publishBuild: (body) => {
+          if (!ablyReadyRef.current) return;
+          try {
+            void channel.publish("build", { type: "build", ...body });
+          } catch {
+            // ignore
+          }
+        },
+        publishToll: (toPlayerId, amount) => {
+          if (!ablyReadyRef.current) return;
+          try {
+            void channel.publish("toll", {
+              type: "toll",
+              toPlayerId,
+              amount,
+            });
+          } catch {
+            // ignore
+          }
+        },
+      };
+
+      try {
+        channel.subscribe(onMessage);
+        channel.presence.subscribe((msg) => {
+          applyPresenceMember(msg.data, msg.action);
+        });
+
+        const enterData: PresenceMember = {
+          id: me.player.id,
+          name: me.player.name,
+          emoji: normalizePlayerEmoji(me.player.emoji),
+          bubble: normalizeBubble(me.player.bubble),
+          x: displayPosRef.current?.x ?? me.player.x,
+          y: displayPosRef.current?.y ?? me.player.y,
+          status: travelingRef.current ? "traveling" : me.player.status,
+        };
+        await channel.presence.enter(enterData);
+        if (cancelled) return;
+
+        const members = await channel.presence.get();
+        if (cancelled) return;
+        ablyPresentIdsRef.current = new Set();
+        const online: OnlinePlayer[] = [
+          {
+            id: me.player.id,
+            name: me.player.name,
+            emoji: normalizePlayerEmoji(me.player.emoji),
+            x: enterData.x,
+            y: enterData.y,
+            status: enterData.status,
+            isSelf: true,
+          },
+        ];
+        for (const m of members) {
+          const data = m.data as Partial<PresenceMember> | undefined;
+          if (!data || typeof data.id !== "number" || data.id === selfId) {
+            continue;
+          }
+          online.push(
+            presenceToOnline({
+              id: data.id,
+              name: typeof data.name === "string" ? data.name : `#${data.id}`,
+              emoji: normalizePlayerEmoji(data.emoji),
+              x: typeof data.x === "number" ? data.x : 0,
+              y: typeof data.y === "number" ? data.y : 0,
+              status: typeof data.status === "string" ? data.status : "idle",
+            }),
+          );
+          applyPresenceMember(data, "present");
+        }
+        setOnlinePlayers(online);
+        ablyReadyRef.current = true;
+      } catch (err) {
+        console.warn("[ably] connect failed; staying on HTTP sync", err);
+        ablyReadyRef.current = false;
+        ablyPresentIdsRef.current = new Set();
+        publishRealtimeRef.current = null;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      ablyReadyRef.current = false;
+      ablyPresentIdsRef.current = new Set();
+      publishRealtimeRef.current = null;
+      const ch = ablyChannelRef.current;
+      ablyChannelRef.current = null;
+      if (ch) {
+        try {
+          void ch.presence.leave();
+          ch.unsubscribe();
+          ch.presence.unsubscribe();
+        } catch {
+          // ignore
+        }
+      }
+      closeAblyClient();
+    };
+    // Connect once per player/map; pose updates go through presence.update
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me?.player.id, me?.player.currentMapId, me?.map?.id, rebuildFogAt]);
+
   function finishLocalTravel(end: Point) {
+    const origin = travelOriginRef.current;
+    const target = travelTargetRef.current;
     stopLocalTravelTimer();
     clearTravelUi();
     applyLocalPos(end, "idle");
+    pushLocalLog("travel_arrive", {
+      at: end,
+      from: origin ?? undefined,
+      to: target ?? undefined,
+    });
     void (async () => {
       try {
         await fetch("/api/travel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "stop", x: end.x, y: end.y }),
+          body: JSON.stringify({
+            mode: "stop",
+            x: end.x,
+            y: end.y,
+            reason: "arrived",
+          }),
         });
       } catch {
         // ignore — settle on softRefresh will catch up
@@ -616,7 +1202,24 @@ export default function PlayClient() {
         return;
       }
       travelIndexRef.current = next;
+      // +1 gold and XP per step (server confirms on settle/stop)
+      goldRef.current += 1;
+      setMe((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          player: {
+            ...prev.player,
+            gold: prev.player.gold + 1,
+            xp: prev.player.xp + XP_PER_STEP,
+          },
+        };
+      });
       const pos = p[next]!;
+      const prevPos = p[next - 1];
+      if (prevPos) {
+        applyLocalTollEntries(prevPos, pos);
+      }
       updateTravelProgress(next, p.length);
       if (next >= p.length - 1) {
         finishLocalTravel(pos);
@@ -632,15 +1235,27 @@ export default function PlayClient() {
     if (!travelingRef.current) return;
     const pos = displayPosRef.current;
     if (!pos) return;
+    const origin = travelOriginRef.current;
+    const target = travelTargetRef.current;
     stopLocalTravelTimer();
     clearTravelUi();
     applyLocalPos(pos, "idle");
+    pushLocalLog("travel_stop", {
+      at: pos,
+      from: origin ?? undefined,
+      to: target ?? undefined,
+    });
     void (async () => {
       try {
         await fetch("/api/travel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: "stop", x: pos.x, y: pos.y }),
+          body: JSON.stringify({
+            mode: "stop",
+            x: pos.x,
+            y: pos.y,
+            reason: "manual",
+          }),
         });
       } catch {
         // ignore — local stop already applied
@@ -659,11 +1274,18 @@ export default function PlayClient() {
     };
     const path = buildDirectionalPath(from, dx, dy, steps);
     if (path.length < 2) {
-      setError("无法朝该方向移动（地图边缘）");
+      setError("Can't move that way (map edge)");
       return;
     }
 
     const origin = path[0]!;
+    const target = path[path.length - 1]!;
+    const moved = path.length - 1;
+    const startLogId = pushLocalLog("travel_start", {
+      from: origin,
+      to: target,
+      steps: moved,
+    });
     startLocalTravel(path, me.config.travelSecondsPerTile);
 
     void (async () => {
@@ -679,13 +1301,20 @@ export default function PlayClient() {
           const here = displayPosRef.current ?? origin;
           stopLocalTravelTimer();
           clearTravelUi();
-          setError(data?.error ?? "行进失败");
+          removeLocalLog(startLogId);
+          setError(data?.error ?? "Travel failed");
           if (progressed) {
             applyLocalPos(here, "idle");
+            pushLocalLog("travel_stop", { at: here, from: origin, to: target });
             void fetch("/api/travel", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ mode: "stop", x: here.x, y: here.y }),
+              body: JSON.stringify({
+                mode: "stop",
+                x: here.x,
+                y: here.y,
+                reason: "manual",
+              }),
             }).finally(() => void softRefresh());
           } else {
             applyLocalPos(origin, "idle");
@@ -693,18 +1322,26 @@ export default function PlayClient() {
           }
           return;
         }
+        setJournalTick((t) => t + 1);
       } catch {
         const progressed = travelIndexRef.current > 0;
         const here = displayPosRef.current ?? origin;
         stopLocalTravelTimer();
         clearTravelUi();
-        setError("行进失败");
+        removeLocalLog(startLogId);
+        setError("Travel failed");
         if (progressed) {
           applyLocalPos(here, "idle");
+          pushLocalLog("travel_stop", { at: here, from: origin, to: target });
           void fetch("/api/travel", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ mode: "stop", x: here.x, y: here.y }),
+            body: JSON.stringify({
+              mode: "stop",
+              x: here.x,
+              y: here.y,
+              reason: "manual",
+            }),
           }).finally(() => void softRefresh());
         } else {
           applyLocalPos(origin, "idle");
@@ -714,72 +1351,225 @@ export default function PlayClient() {
     })();
   }
 
-  async function onWaypoint() {
+  async function onConfirmBuild(kind: BuildKind, name: string) {
     if (!me || travelingRef.current) return;
     const x = me.player.x;
     const y = me.player.y;
+    if (localTooCloseToStructure(x, y)) {
+      setPendingBuild(null);
+      return;
+    }
     setBusy(true);
     setError("");
+    const buildLogId = pushLocalLog("build", {
+      buildingType: kind,
+      name,
+      x,
+      y,
+    });
     try {
       const res = await fetch("/api/build", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "waypoint",
-          x,
-          y,
-          message: "路标",
-        }),
+        body: JSON.stringify({ action: kind, x, y, name }),
       });
       const data = await readJson<{ error?: string }>(res);
       if (!res.ok) {
-        setError(data?.error ?? "操作失败");
+        removeLocalLog(buildLogId);
+        setError(data?.error ?? "Build failed");
         return;
       }
+      setPendingBuild(null);
+      // Optimistic map marker + XP before softRefresh returns
+      setMe((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          player: {
+            ...prev.player,
+            xp: prev.player.xp + XP_BUILD,
+          },
+        };
+      });
+      overlaysRef.current.set(`${x},${y}`, {
+        building: {
+          id: -1,
+          type: kind,
+          ownerId: me.player.id,
+          ownerName: me.player.name,
+          ownerEmoji: normalizePlayerEmoji(me.player.emoji),
+          level: 1,
+          name,
+          message: name,
+          createdAt: new Date().toISOString(),
+          tollRadius:
+            kind === "flag" || kind === "town" ? FLAG_RANGE_RADIUS : null,
+        },
+        claim: overlaysRef.current.get(`${x},${y}`)?.claim ?? null,
+      });
+      const pos = displayPosRef.current ?? { x, y };
+      const tiles = rebuildFogAt(pos);
+      setViewport((prev) =>
+        prev
+          ? {
+              ...prev,
+              tiles,
+            }
+          : prev,
+      );
+      setExploredRevision((n) => n + 1);
+      publishRealtimeRef.current?.publishBuild({
+        buildingType: kind,
+        x,
+        y,
+        ownerId: me.player.id,
+        ownerName: me.player.name,
+        ownerEmoji: normalizePlayerEmoji(me.player.emoji),
+        name,
+        tollRadius:
+          kind === "flag" || kind === "town" ? FLAG_RANGE_RADIUS : null,
+      });
       void softRefresh();
     } catch {
-      setError("操作失败");
+      removeLocalLog(buildLogId);
+      setError("Build failed");
     } finally {
       setBusy(false);
     }
   }
 
+  async function onEmojiChange(emoji: string) {
+    if (!me) return;
+    const prev = me.player.emoji;
+    setMe((m) =>
+      m
+        ? { ...m, player: { ...m.player, emoji } }
+        : m,
+    );
+    try {
+      const res = await fetch("/api/player/emoji", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ emoji }),
+      });
+      if (!res.ok) {
+        setMe((m) =>
+          m ? { ...m, player: { ...m.player, emoji: prev } } : m,
+        );
+        setError("Could not update avatar");
+      }
+    } catch {
+      setMe((m) =>
+        m ? { ...m, player: { ...m.player, emoji: prev } } : m,
+      );
+      setError("Could not update avatar");
+    }
+  }
+
+  async function onBubbleChange(bubble: string) {
+    if (!me) return;
+    const next = normalizeBubble(bubble);
+    const prev = normalizeBubble(me.player.bubble);
+    setMe((m) =>
+      m ? { ...m, player: { ...m.player, bubble: next } } : m,
+    );
+    try {
+      const res = await fetch("/api/player/bubble", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bubble: next }),
+      });
+      if (!res.ok) {
+        setMe((m) =>
+          m ? { ...m, player: { ...m.player, bubble: prev } } : m,
+        );
+        setError("Could not update bubble");
+        return;
+      }
+      const data = await readJson<{ bubble?: string }>(res);
+      const saved = normalizeBubble(data?.bubble ?? next);
+      setMe((m) =>
+        m ? { ...m, player: { ...m.player, bubble: saved } } : m,
+      );
+      publishRealtimeRef.current?.publishBubble(saved);
+    } catch {
+      setMe((m) =>
+        m ? { ...m, player: { ...m.player, bubble: prev } } : m,
+      );
+      setError("Could not update bubble");
+    }
+  }
+
   if (!me || !viewport) {
     return (
-      <main className="flex h-dvh items-center justify-center bg-white text-stone-600">
-        加载世界中…
+      <main className="relative flex h-dvh items-center justify-center overflow-hidden text-stone-100">
+        <div aria-hidden className="pointer-events-none absolute inset-0">
+          <Image
+            src="/home-ocean-horizon.png"
+            alt=""
+            fill
+            priority
+            sizes="100vw"
+            className="object-cover object-center"
+          />
+          <div className="absolute inset-0 bg-stone-950/50" />
+        </div>
+        <p className="relative z-10">Loading world…</p>
       </main>
     );
   }
 
-  const ENTITY_W = 176;
-  const ENTITY_H = 140;
-  const GAP = 10;
-  const halfCell = Math.max(8, anchors.cellSize / 2);
+  const ENTITY_W = 192;
+  const ENTITY_H =
+    selection?.type === "player" && selection.id === me.player.id ? 280 : 168;
 
-  const entityPopupPos = (() => {
-    if (!anchors.entity || !selection) return null;
+  const selfTerrain =
+    selection?.type === "player" && selection.id === me.player.id
+      ? generateTile(
+          me.player.x,
+          me.player.y,
+          me.config.worldSeed ?? WORLD_SEED,
+        )
+      : null;
+  const selfTileKey = `${me.player.x},${me.player.y}`;
+  const selfOccupied = Boolean(
+    selection?.type === "player" &&
+      selection.id === me.player.id &&
+      overlaysRef.current.get(selfTileKey)?.building,
+  );
+  const selfTooClose =
+    selection?.type === "player" &&
+    selection.id === me.player.id &&
+    localTooCloseToStructure(me.player.x, me.player.y);
+
+  const popupAnchor = (() => {
+    if (!selection || !anchors.entity) return null;
     if (
       !Number.isFinite(anchors.entity.x) ||
       !Number.isFinite(anchors.entity.y)
     ) {
       return null;
     }
-    const rawLeft = anchors.entity.x - halfCell - ENTITY_W - GAP;
-    const above = anchors.entity.y - halfCell - ENTITY_H - GAP;
-    const rawTop =
-      above < 8 ? anchors.entity.y + halfCell + GAP : above;
-    return clampPopup(rawLeft, rawTop, ENTITY_W, ENTITY_H, mapSize.w, mapSize.h);
+    // Anchors are already map-area / wrap local
+    return anchors.entity;
   })();
 
   return (
-    <main className="relative flex h-dvh flex-col overflow-hidden bg-white">
-      <Hud
-        player={me.player}
-        onSignOut={() => signOut({ callbackUrl: "/" })}
-      />
+    <main className="relative flex h-dvh flex-col overflow-hidden">
+      <div aria-hidden className="pointer-events-none absolute inset-0 z-0">
+        <Image
+          src="/home-ocean-horizon.png"
+          alt=""
+          fill
+          priority
+          sizes="100vw"
+          className="object-cover object-center"
+        />
+        <div className="absolute inset-0 bg-stone-950/35" />
+      </div>
+      <div className="relative z-10 flex min-h-0 flex-1 flex-col">
       {error ? (
-        <p className="shrink-0 bg-red-50 px-3 py-1 text-xs text-red-700">
+        <p className="pointer-events-none absolute left-1/2 top-3 z-30 -translate-x-1/2 rounded-lg bg-red-50/95 px-3 py-1 text-xs text-red-700 shadow">
           {error}
         </p>
       ) : null}
@@ -791,13 +1581,123 @@ export default function PlayClient() {
           others={viewport.players}
           visionRadius={viewport.visionRadius}
           viewRadius={viewRadiusForZoom(mapZoomLevel, viewport.visionRadius)}
-          selectedEntityId={selection?.id ?? null}
-          onEntityHoverChange={onEntityHoverChange}
+          selectedPoint={selection}
+          onPointSelect={onPointSelect}
+          onPlayerClick={(p) =>
+            setProfileTarget({
+              id: p.id,
+              name: p.name,
+              emoji: p.emoji,
+              x: p.x,
+              y: p.y,
+              online: p.online,
+            })
+          }
           onAnchorsChange={onAnchorsChange}
         />
 
         <div className="pointer-events-none absolute inset-0 z-10">
-          <div className="absolute left-4 top-4 z-20">
+          <div className="absolute left-4 top-4 z-20 flex flex-col items-stretch gap-2">
+            <PlayerStatusPanel
+              player={{
+                name: me.player.name,
+                emoji: me.player.emoji,
+                gold: me.player.gold,
+                xp: me.player.xp,
+                x: me.player.x,
+                y: me.player.y,
+                status: me.player.status,
+              }}
+              refreshToken={journalTick}
+              onSignOut={() => signOut({ callbackUrl: "/" })}
+            />
+            <OnlinePlayers
+              players={onlinePlayers}
+              self={{
+                id: me.player.id,
+                name: me.player.name,
+                emoji: me.player.emoji,
+                x: me.player.x,
+                y: me.player.y,
+              }}
+              onPlayerClick={(p) =>
+                setProfileTarget({
+                  id: p.id,
+                  name: p.name,
+                  emoji: p.emoji,
+                  x: p.x,
+                  y: p.y,
+                  online: true,
+                })
+              }
+            />
+          </div>
+
+          <div className="absolute right-4 top-4 z-20">
+            <JournalPanel
+              refreshToken={journalTick}
+              localLogs={localLogs}
+              onLocalLogsMatched={onLocalLogsMatched}
+            />
+          </div>
+
+          {selection && popupAnchor ? (
+            <MapPointPopup
+              anchor={popupAnchor}
+              cellSize={anchors.cellSize}
+              mapW={mapSize.w}
+              mapH={mapSize.h}
+              width={ENTITY_W}
+              height={ENTITY_H}
+              onMouseEnter={cancelCloseEntity}
+              onMouseLeave={scheduleCloseEntity}
+            >
+              {selection.type === "flag" ? (
+                <FlagCard flag={selection} />
+              ) : selection.type === "town" ? (
+                <TownCard town={selection} />
+              ) : (
+                <UserCard
+                  name={selection.name}
+                  playerId={selection.id}
+                  emoji={
+                    selection.id === me.player.id
+                      ? me.player.emoji
+                      : selection.emoji
+                  }
+                  bubble={
+                    selection.id === me.player.id
+                      ? me.player.bubble
+                      : selection.bubble
+                  }
+                  isSelf={selection.id === me.player.id}
+                  gold={me.player.gold}
+                  xp={me.player.xp ?? 0}
+                  x={selection.x}
+                  y={selection.y}
+                  terrain={selfTerrain?.terrain}
+                  tileOccupied={selfOccupied}
+                  tooCloseToStructure={Boolean(selfTooClose)}
+                  busy={busy || traveling}
+                  onBuildSelect={
+                    selection.id === me.player.id ? trySelectBuild : undefined
+                  }
+                  onEmojiChange={
+                    selection.id === me.player.id
+                      ? (emoji) => void onEmojiChange(emoji)
+                      : undefined
+                  }
+                  onBubbleChange={
+                    selection.id === me.player.id
+                      ? (bubble) => void onBubbleChange(bubble)
+                      : undefined
+                  }
+                />
+              )}
+            </MapPointPopup>
+          ) : null}
+
+          <div className="absolute bottom-4 left-4 z-20 flex flex-col items-start gap-2">
             <Minimap
               exploredRef={exploredRef}
               exploredRevision={exploredRevision}
@@ -809,36 +1709,6 @@ export default function PlayClient() {
                 viewport.visionRadius,
               )}
             />
-          </div>
-
-          {selection && entityPopupPos ? (
-            <div
-              className="pointer-events-auto absolute left-0 top-0"
-              style={{
-                transform: `translate(${entityPopupPos.left}px, ${entityPopupPos.top}px)`,
-              }}
-              onMouseEnter={cancelCloseEntity}
-              onMouseLeave={scheduleCloseEntity}
-            >
-              <UserCard
-                name={selection.name}
-                isSelf={selection.id === me.player.id}
-                gold={me.player.gold}
-                xp={me.player.xp ?? 0}
-                x={selection.x}
-                y={selection.y}
-                busy={busy || traveling}
-                onClose={closeEntity}
-                onWaypoint={
-                  selection.id === me.player.id
-                    ? () => void onWaypoint()
-                    : undefined
-                }
-              />
-            </div>
-          ) : null}
-
-          <div className="absolute bottom-4 left-4 z-20">
             <ZoomSlider
               zoomLevel={mapZoomLevel}
               visionRadius={viewport.visionRadius}
@@ -857,6 +1727,23 @@ export default function PlayClient() {
           </div>
         </div>
       </div>
+      </div>
+
+      {pendingBuild ? (
+        <BuildNameDialog
+          kind={pendingBuild}
+          busy={busy}
+          onCancel={() => setPendingBuild(null)}
+          onConfirm={(name) => void onConfirmBuild(pendingBuild, name)}
+        />
+      ) : null}
+
+      {profileTarget ? (
+        <PlayerProfileModal
+          target={profileTarget}
+          onClose={() => setProfileTarget(null)}
+        />
+      ) : null}
     </main>
   );
 }
