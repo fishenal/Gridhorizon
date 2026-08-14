@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth";
 import { AuthPanel } from "@/components/AuthPanel";
+import { OpenSourceFooter } from "@/components/OpenSourceFooter";
 import { redirect } from "next/navigation";
 import Image from "next/image";
 
@@ -34,6 +35,9 @@ export default async function HomePage() {
           time.
         </p>
         <AuthPanel />
+      </div>
+      <div className="relative z-10">
+        <OpenSourceFooter tone="onDark" />
       </div>
     </main>
   );

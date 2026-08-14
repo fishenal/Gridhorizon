@@ -26,6 +26,7 @@ import {
   type BuildKind,
 } from "@/components/game/UserCard";
 import { MapPointPopup } from "@/components/game/MapPointPopup";
+import { OpenSourceFooter } from "@/components/OpenSourceFooter";
 import { generateTile, hasWaterNeighbor } from "@/lib/map/generator";
 import {
   FLAG_RANGE_RADIUS,
@@ -1772,6 +1773,10 @@ export default function PlayClient() {
           </div>
         </div>
       </div>
+      </div>
+
+      <div className="relative z-10">
+        <OpenSourceFooter tone="onDark" />
       </div>
 
       {pendingBuild ? (
