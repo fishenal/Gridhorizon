@@ -17,14 +17,25 @@ import {
   PlayerProfileModal,
   type PlayerProfileTarget,
 } from "@/components/game/PlayerProfileModal";
-import { UserCard, FlagCard, TownCard, BuildNameDialog, type BuildKind } from "@/components/game/UserCard";
+import {
+  UserCard,
+  SelfToolCard,
+  FlagCard,
+  TownCard,
+  BuildNameDialog,
+  type BuildKind,
+} from "@/components/game/UserCard";
 import { MapPointPopup } from "@/components/game/MapPointPopup";
-import { generateTile } from "@/lib/map/generator";
+import { generateTile, hasWaterNeighbor } from "@/lib/map/generator";
 import {
   FLAG_RANGE_RADIUS,
   normalizeBubble,
   normalizePlayerEmoji,
 } from "@/lib/game/playerStyle";
+import {
+  buildNeedsName,
+  getBuildEntry,
+} from "@/lib/game/buildCatalog";
 import { ZoomSlider } from "@/components/game/ZoomSlider";
 import {
   JournalPanel,
@@ -39,7 +50,7 @@ import {
   rebuildLocalViewportTiles,
   type TileOverlay,
 } from "@/lib/map/localFog";
-import { VISION_RADIUS, WORLD_SEED, WAYPOINT_TOLL, XP_BUILD, XP_PER_STEP } from "@/lib/map/constants";
+import { VISION_RADIUS, WORLD_SEED, WAYPOINT_TOLL, XP_BUILD, XP_PER_STEP, FLAG_COST, MINE_COST } from "@/lib/map/constants";
 import {
   isSpacedStructureType,
   isTooCloseToAnyStructure,
@@ -151,6 +162,9 @@ export default function PlayClient() {
   const [busy, setBusy] = useState(false);
   const [traveling, setTraveling] = useState(false);
   const [pendingBuild, setPendingBuild] = useState<BuildKind | null>(null);
+  const confirmBuildRef = useRef<(kind: BuildKind, name: string) => void>(
+    () => {},
+  );
   const [profileTarget, setProfileTarget] =
     useState<PlayerProfileTarget | null>(null);
   const [travelProgress, setTravelProgress] = useState<TravelProgress | null>(
@@ -321,10 +335,20 @@ export default function PlayClient() {
   const trySelectBuild = useCallback(
     (kind: BuildKind) => {
       if (!me || travelingRef.current) return;
-      // UserCard already shows the live too-close hint; don't sticky-banner it.
-      if (localTooCloseToStructure(me.player.x, me.player.y)) return;
+      const entry = getBuildEntry(kind);
+      // Spaced structures: client hint lives in BuildGrid; don't sticky-banner.
+      if (
+        entry.spaced &&
+        localTooCloseToStructure(me.player.x, me.player.y)
+      ) {
+        return;
+      }
       setError("");
-      setPendingBuild(kind);
+      if (buildNeedsName(kind)) {
+        setPendingBuild(kind);
+      } else {
+        confirmBuildRef.current(kind, "");
+      }
     },
     [localTooCloseToStructure, me],
   );
@@ -1355,15 +1379,17 @@ export default function PlayClient() {
     if (!me || travelingRef.current) return;
     const x = me.player.x;
     const y = me.player.y;
-    if (localTooCloseToStructure(x, y)) {
+    const entry = getBuildEntry(kind);
+    if (entry.spaced && localTooCloseToStructure(x, y)) {
       setPendingBuild(null);
       return;
     }
     setBusy(true);
     setError("");
+    const buildName = name.trim() || null;
     const buildLogId = pushLocalLog("build", {
       buildingType: kind,
-      name,
+      name: buildName,
       x,
       y,
     });
@@ -1371,7 +1397,12 @@ export default function PlayClient() {
       const res = await fetch("/api/build", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: kind, x, y, name }),
+        body: JSON.stringify({
+          action: kind,
+          x,
+          y,
+          ...(buildName ? { name: buildName } : {}),
+        }),
       });
       const data = await readJson<{ error?: string }>(res);
       if (!res.ok) {
@@ -1383,11 +1414,14 @@ export default function PlayClient() {
       // Optimistic map marker + XP before softRefresh returns
       setMe((prev) => {
         if (!prev) return prev;
+        const goldCost =
+          kind === "flag" ? FLAG_COST : kind === "mine" ? MINE_COST : 0;
         return {
           ...prev,
           player: {
             ...prev.player,
             xp: prev.player.xp + XP_BUILD,
+            gold: Math.max(0, prev.player.gold - goldCost),
           },
         };
       });
@@ -1399,8 +1433,8 @@ export default function PlayClient() {
           ownerName: me.player.name,
           ownerEmoji: normalizePlayerEmoji(me.player.emoji),
           level: 1,
-          name,
-          message: name,
+          name: buildName,
+          message: buildName,
           createdAt: new Date().toISOString(),
           tollRadius:
             kind === "flag" || kind === "town" ? FLAG_RANGE_RADIUS : null,
@@ -1425,7 +1459,7 @@ export default function PlayClient() {
         ownerId: me.player.id,
         ownerName: me.player.name,
         ownerEmoji: normalizePlayerEmoji(me.player.emoji),
-        name,
+        name: buildName,
         tollRadius:
           kind === "flag" || kind === "town" ? FLAG_RANGE_RADIUS : null,
       });
@@ -1437,6 +1471,9 @@ export default function PlayClient() {
       setBusy(false);
     }
   }
+  confirmBuildRef.current = (kind, name) => {
+    void onConfirmBuild(kind, name);
+  };
 
   async function onEmojiChange(emoji: string) {
     if (!me) return;
@@ -1519,7 +1556,8 @@ export default function PlayClient() {
     );
   }
 
-  const ENTITY_W = 192;
+  const ENTITY_W =
+    selection?.type === "player" && selection.id === me.player.id ? 224 : 192;
   const ENTITY_H =
     selection?.type === "player" && selection.id === me.player.id ? 280 : 168;
 
@@ -1532,11 +1570,25 @@ export default function PlayClient() {
         )
       : null;
   const selfTileKey = `${me.player.x},${me.player.y}`;
+  const selfOverlay = overlaysRef.current.get(selfTileKey);
   const selfOccupied = Boolean(
     selection?.type === "player" &&
       selection.id === me.player.id &&
-      overlaysRef.current.get(selfTileKey)?.building,
+      selfOverlay?.building,
   );
+  const selfClaimedBySelf = Boolean(
+    selection?.type === "player" &&
+      selection.id === me.player.id &&
+      selfOverlay?.claim?.ownerId === me.player.id,
+  );
+  const selfShore =
+    selection?.type === "player" && selection.id === me.player.id
+      ? hasWaterNeighbor(
+          me.player.x,
+          me.player.y,
+          me.config.worldSeed ?? WORLD_SEED,
+        )
+      : false;
   const selfTooClose =
     selection?.type === "player" &&
     selection.id === me.player.id &&
@@ -1656,42 +1708,35 @@ export default function PlayClient() {
                 <FlagCard flag={selection} />
               ) : selection.type === "town" ? (
                 <TownCard town={selection} />
-              ) : (
-                <UserCard
+              ) : selection.id === me.player.id ? (
+                <SelfToolCard
                   name={selection.name}
-                  playerId={selection.id}
-                  emoji={
-                    selection.id === me.player.id
-                      ? me.player.emoji
-                      : selection.emoji
-                  }
-                  bubble={
-                    selection.id === me.player.id
-                      ? me.player.bubble
-                      : selection.bubble
-                  }
-                  isSelf={selection.id === me.player.id}
+                  emoji={me.player.emoji}
+                  bubble={me.player.bubble}
                   gold={me.player.gold}
                   xp={me.player.xp ?? 0}
                   x={selection.x}
                   y={selection.y}
                   terrain={selfTerrain?.terrain}
+                  isLand={selfTerrain?.isLand}
+                  resourceType={selfTerrain?.resourceType}
                   tileOccupied={selfOccupied}
                   tooCloseToStructure={Boolean(selfTooClose)}
+                  claimedBySelf={selfClaimedBySelf}
+                  shore={selfShore}
                   busy={busy || traveling}
-                  onBuildSelect={
-                    selection.id === me.player.id ? trySelectBuild : undefined
-                  }
-                  onEmojiChange={
-                    selection.id === me.player.id
-                      ? (emoji) => void onEmojiChange(emoji)
-                      : undefined
-                  }
-                  onBubbleChange={
-                    selection.id === me.player.id
-                      ? (bubble) => void onBubbleChange(bubble)
-                      : undefined
-                  }
+                  onBuildSelect={trySelectBuild}
+                  onEmojiChange={(emoji) => void onEmojiChange(emoji)}
+                  onBubbleChange={(bubble) => void onBubbleChange(bubble)}
+                />
+              ) : (
+                <UserCard
+                  name={selection.name}
+                  playerId={selection.id}
+                  emoji={selection.emoji}
+                  bubble={selection.bubble}
+                  x={selection.x}
+                  y={selection.y}
                 />
               )}
             </MapPointPopup>
