@@ -4,7 +4,7 @@ Asynchronous open-world exploration prototype: procedural **8000×8000** map, fo
 
 Stack: Next.js (App Router), Neon Postgres + Drizzle, Auth.js, Ably (realtime).
 
-Community: [Discord](https://discord.gg/HxS7Z4p4EP)
+Demo: [Play online](https://gridhorizon.vercel.app/) · Community: [Discord](https://discord.gg/HxS7Z4p4EP)
 
 ## Screenshots
 
