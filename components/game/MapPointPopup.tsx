@@ -43,6 +43,9 @@ export function MapPointPopup({
 }: Props) {
   const gap = 10;
   const half = Math.max(4, cellSize / 2);
+  // Never let the popup exceed the map viewport (keeps controls clickable).
+  const maxH = Math.max(120, mapH - 16);
+  const h = Math.min(height, maxH);
 
   // Prefer left of cell; if clipped, place to the right
   let rawLeft = anchor.x - half - width - gap;
@@ -52,17 +55,19 @@ export function MapPointPopup({
 
   // Align card top with cell top so it sits next to the grid, not high above
   let rawTop = anchor.y - half;
-  if (rawTop + height > mapH - 8) {
-    rawTop = anchor.y + half - height;
+  if (rawTop + h > mapH - 8) {
+    rawTop = anchor.y + half - h;
   }
 
-  const pos = clamp(rawLeft, rawTop, width, height, mapW, mapH);
+  const pos = clamp(rawLeft, rawTop, width, h, mapW, mapH);
 
   return (
     <div
       className="pointer-events-auto absolute left-0 top-0 z-30"
       style={{
         transform: `translate(${pos.left}px, ${pos.top}px)`,
+        maxHeight: h,
+        width,
       }}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
