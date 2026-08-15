@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { players } from "@/lib/db/schema";
 import { listOnlineOnMap, touchLastSeen } from "@/lib/game/presence";
 import { normalizePlayerEmoji } from "@/lib/game/playerStyle";
+import { settleOutstandingTravel } from "@/lib/game/travel";
 import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
 
 export async function GET() {
@@ -16,6 +17,7 @@ export async function GET() {
     const playerId = Number(session.user.id);
     const db = getDb();
     await ensureDefaultMap(db);
+    await settleOutstandingTravel(db);
     await touchLastSeen(db, playerId);
 
     const me = await db.query.players.findFirst({

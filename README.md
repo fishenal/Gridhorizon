@@ -38,7 +38,7 @@ pnpm db:push
 pnpm dev
 ```
 
-Open http://localhost:3000 → register → `/play`.
+Open http://localhost:3000 — a guest traveler is created automatically and you enter `/play`. Credentials stay in this browser’s `localStorage`.
 
 ## Preview (Vercel)
 

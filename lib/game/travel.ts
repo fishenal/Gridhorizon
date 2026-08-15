@@ -237,16 +237,44 @@ export async function settleTravel(db: Db, playerId: number): Promise<void> {
   const job = await db.query.travelJobs.findFirst({
     where: eq(travelJobs.playerId, playerId),
   });
-  if (!job) return;
+  if (!job) {
+    // Orphan status: traveling with no job (closed tab / interrupted settle).
+    await db
+      .update(players)
+      .set({ status: "idle" })
+      .where(and(eq(players.id, playerId), eq(players.status, "traveling")));
+    return;
+  }
 
   const mapId = job.mapId ?? DEFAULT_MAP_ID;
   const path = JSON.parse(job.pathJson) as Point[];
+
+  const finishJob = async (pos: Point) => {
+    await db.delete(travelJobs).where(eq(travelJobs.id, job.id));
+    await db
+      .update(players)
+      .set({ status: "idle", x: pos.x, y: pos.y })
+      .where(eq(players.id, playerId));
+  };
+
   if (path.length === 0) {
     await db.delete(travelJobs).where(eq(travelJobs.id, job.id));
     await db
       .update(players)
       .set({ status: "idle" })
       .where(eq(players.id, playerId));
+    return;
+  }
+
+  // Already at (or past) destination — clear stuck traveling.
+  if (job.pathIndex >= path.length - 1) {
+    const pos = path[path.length - 1]!;
+    await finishJob(pos);
+    await logTravelArrive(db, playerId, mapId, {
+      at: pos,
+      from: path[0],
+      to: path[path.length - 1],
+    });
     return;
   }
 
@@ -312,6 +340,40 @@ export async function settleTravel(db: Db, playerId: number): Promise<void> {
       })
       .where(eq(travelJobs.id, job.id));
   }
+}
+
+/**
+ * Advance all open travel jobs and clear orphan `traveling` statuses.
+ * Safe to call from list endpoints / cron.
+ */
+export async function settleOutstandingTravel(db: Db): Promise<number> {
+  const jobs = await db
+    .select({ playerId: travelJobs.playerId })
+    .from(travelJobs);
+  for (const row of jobs) {
+    await settleTravel(db, row.playerId);
+  }
+
+  // Players marked traveling with no remaining job.
+  const stillTraveling = await db
+    .select({ id: players.id })
+    .from(players)
+    .where(eq(players.status, "traveling"));
+  let orphans = 0;
+  for (const row of stillTraveling) {
+    const job = await db.query.travelJobs.findFirst({
+      where: eq(travelJobs.playerId, row.id),
+    });
+    if (!job) {
+      await db
+        .update(players)
+        .set({ status: "idle" })
+        .where(eq(players.id, row.id));
+      orphans += 1;
+    }
+  }
+
+  return jobs.length + orphans;
 }
 
 export async function startTravel(

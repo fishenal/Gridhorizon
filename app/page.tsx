@@ -1,5 +1,5 @@
 import { auth } from "@/lib/auth";
-import { AuthPanel } from "@/components/AuthPanel";
+import { GuestEntry } from "@/components/GuestEntry";
 import { OpenSourceFooter } from "@/components/OpenSourceFooter";
 import { redirect } from "next/navigation";
 import Image from "next/image";
@@ -31,10 +31,10 @@ export default async function HomePage() {
         </h1>
         <p className="max-w-lg text-lg leading-relaxed text-stone-200">
           A procedural world with offline travel settlement, fog of war, and
-          waypoint intel. Start from the center and measure distance in real
-          time.
+          waypoint intel. Jump in instantly — your traveler is saved on this
+          device.
         </p>
-        <AuthPanel />
+        <GuestEntry />
       </div>
       <div className="relative z-10">
         <OpenSourceFooter tone="onDark" />
