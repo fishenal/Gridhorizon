@@ -26,7 +26,6 @@ type Props = {
     status?: string;
   };
   refreshToken?: number;
-  onSignOut: () => void;
 };
 
 function formatTime(iso: string) {
@@ -43,7 +42,6 @@ function formatTime(iso: string) {
 export function PlayerStatusPanel({
   player,
   refreshToken = 0,
-  onSignOut,
 }: Props) {
   const [buildings, setBuildings] = useState<OwnedBuilding[]>([]);
   const [loading, setLoading] = useState(false);
@@ -126,16 +124,6 @@ export function PlayerStatusPanel({
             ))}
           </ul>
         )}
-      </div>
-
-      <div className="border-t border-stone-200 p-2">
-        <button
-          type="button"
-          onClick={onSignOut}
-          className="w-full rounded-lg border border-stone-200 px-2 py-1.5 text-xs text-stone-700 hover:bg-stone-50"
-        >
-          Log out
-        </button>
       </div>
     </div>
   );

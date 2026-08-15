@@ -1,6 +1,5 @@
 "use client";
 
-import { signOut } from "next-auth/react";
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -17,6 +16,10 @@ import {
   PlayerProfileModal,
   type PlayerProfileTarget,
 } from "@/components/game/PlayerProfileModal";
+import {
+  AllAssetsModal,
+  AllPlayersModal,
+} from "@/components/game/DirectoryModals";
 import {
   UserCard,
   SelfToolCard,
@@ -168,6 +171,9 @@ export default function PlayClient() {
   );
   const [profileTarget, setProfileTarget] =
     useState<PlayerProfileTarget | null>(null);
+  const [directory, setDirectory] = useState<"players" | "assets" | null>(
+    null,
+  );
   const [travelProgress, setTravelProgress] = useState<TravelProgress | null>(
     null,
   );
@@ -1651,6 +1657,22 @@ export default function PlayClient() {
 
         <div className="pointer-events-none absolute inset-0 z-10">
           <div className="absolute left-4 top-4 z-20 flex flex-col items-stretch gap-2">
+            <div className="pointer-events-auto flex gap-1.5">
+              <button
+                type="button"
+                onClick={() => setDirectory("players")}
+                className="rounded-lg border border-stone-200 bg-white/95 px-2.5 py-1.5 text-xs font-medium text-stone-800 shadow-md backdrop-blur hover:bg-stone-50"
+              >
+                Players
+              </button>
+              <button
+                type="button"
+                onClick={() => setDirectory("assets")}
+                className="rounded-lg border border-stone-200 bg-white/95 px-2.5 py-1.5 text-xs font-medium text-stone-800 shadow-md backdrop-blur hover:bg-stone-50"
+              >
+                Assets
+              </button>
+            </div>
             <PlayerStatusPanel
               player={{
                 name: me.player.name,
@@ -1662,7 +1684,6 @@ export default function PlayClient() {
                 status: me.player.status,
               }}
               refreshToken={journalTick}
-              onSignOut={() => signOut({ callbackUrl: "/" })}
             />
             <OnlinePlayers
               players={onlinePlayers}
@@ -1785,6 +1806,37 @@ export default function PlayClient() {
           busy={busy}
           onCancel={() => setPendingBuild(null)}
           onConfirm={(name) => void onConfirmBuild(pendingBuild, name)}
+        />
+      ) : null}
+
+      {directory === "players" ? (
+        <AllPlayersModal
+          onClose={() => setDirectory(null)}
+          onPlayerClick={(p) => {
+            setDirectory(null);
+            setProfileTarget({
+              id: p.id,
+              name: p.name,
+              emoji: p.emoji,
+              x: p.x,
+              y: p.y,
+              online: p.online,
+            });
+          }}
+        />
+      ) : null}
+
+      {directory === "assets" ? (
+        <AllAssetsModal
+          onClose={() => setDirectory(null)}
+          onOwnerClick={(owner) => {
+            setDirectory(null);
+            setProfileTarget({
+              id: owner.id,
+              name: owner.name,
+              emoji: owner.emoji,
+            });
+          }}
         />
       ) : null}
 
