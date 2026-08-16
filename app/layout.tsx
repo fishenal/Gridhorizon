@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 import { Providers } from "@/components/Providers";
 import "./globals.css";
 
@@ -30,6 +31,7 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col bg-[radial-gradient(ellipse_at_top,_#e8f5f2_0%,_#f5f0e8_45%,_#ebe4d6_100%)] text-stone-900">
         <Providers>{children}</Providers>
+        <Analytics />
       </body>
     </html>
   );
