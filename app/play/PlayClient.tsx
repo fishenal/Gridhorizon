@@ -1677,6 +1677,7 @@ export default function PlayClient() {
               player={{
                 name: me.player.name,
                 emoji: me.player.emoji,
+                bubble: me.player.bubble,
                 gold: me.player.gold,
                 xp: me.player.xp,
                 x: me.player.x,
@@ -1684,6 +1685,16 @@ export default function PlayClient() {
                 status: me.player.status,
               }}
               refreshToken={journalTick}
+              busy={busy || traveling}
+              onNameChange={(name) =>
+                setMe((prev) =>
+                  prev
+                    ? { ...prev, player: { ...prev.player, name } }
+                    : prev,
+                )
+              }
+              onEmojiChange={(emoji) => void onEmojiChange(emoji)}
+              onBubbleChange={(bubble) => void onBubbleChange(bubble)}
             />
             <OnlinePlayers
               players={onlinePlayers}
@@ -1734,7 +1745,6 @@ export default function PlayClient() {
                 <SelfToolCard
                   name={selection.name}
                   emoji={me.player.emoji}
-                  bubble={me.player.bubble}
                   gold={me.player.gold}
                   xp={me.player.xp ?? 0}
                   x={selection.x}
@@ -1748,8 +1758,6 @@ export default function PlayClient() {
                   shore={selfShore}
                   busy={busy || traveling}
                   onBuildSelect={trySelectBuild}
-                  onEmojiChange={(emoji) => void onEmojiChange(emoji)}
-                  onBubbleChange={(bubble) => void onBubbleChange(bubble)}
                 />
               ) : (
                 <UserCard

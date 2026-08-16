@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { ResourceType, Terrain } from "@/lib/map/generator";
 import {
-  AVATAR_EMOJI_CHOICES,
   FLAG_RANGE_RADIUS,
   influenceSide,
   normalizeBubble,
@@ -19,31 +18,6 @@ import type { SelectedFlag, SelectedTown } from "@/components/game/MapCanvas";
 
 export type { BuildKind };
 
-const BUBBLE_MAX = 300;
-
-type SelfTab = "profile" | "bubble" | "build";
-
-const TAB_META: Record<
-  SelfTab,
-  { label: string; idle: string; active: string }
-> = {
-  profile: {
-    label: "Profile",
-    idle: "text-stone-500 hover:bg-stone-50",
-    active: "bg-stone-100 text-stone-800 ring-1 ring-stone-300",
-  },
-  bubble: {
-    label: "Bubble",
-    idle: "text-pink-500 hover:bg-pink-50",
-    active: "bg-pink-50 text-pink-700 ring-1 ring-pink-300",
-  },
-  build: {
-    label: "Build",
-    idle: "text-teal-600 hover:bg-teal-50",
-    active: "bg-teal-50 text-teal-800 ring-1 ring-teal-300",
-  },
-};
-
 type UserCardProps = {
   name: string;
   playerId: number;
@@ -56,7 +30,6 @@ type UserCardProps = {
 type SelfToolCardProps = {
   name: string;
   emoji?: string;
-  bubble?: string;
   gold?: number;
   xp?: number;
   x: number;
@@ -70,8 +43,6 @@ type SelfToolCardProps = {
   shore?: boolean;
   busy?: boolean;
   onBuildSelect?: (kind: BuildKind) => void;
-  onEmojiChange?: (emoji: string) => void;
-  onBubbleChange?: (bubble: string) => void;
 };
 
 function EmojiFace({ emoji, size = 40 }: { emoji: string; size?: number }) {
@@ -169,11 +140,10 @@ export function UserCard({ name, emoji, bubble, x, y }: UserCardProps) {
   );
 }
 
-/** Self card: short header + Profile / Bubble / Build modes. */
+/** Self card: build tools for the selected tile (no profile tabs). */
 export function SelfToolCard({
   name,
   emoji,
-  bubble,
   gold,
   xp,
   x,
@@ -187,23 +157,8 @@ export function SelfToolCard({
   shore,
   busy,
   onBuildSelect,
-  onEmojiChange,
-  onBubbleChange,
 }: SelfToolCardProps) {
-  const [tab, setTab] = useState<SelfTab>("build");
   const face = normalizePlayerEmoji(emoji);
-  const [draft, setDraft] = useState(() => normalizeBubble(bubble));
-
-  useEffect(() => {
-    setDraft(normalizeBubble(bubble));
-  }, [bubble]);
-
-  const saveBubble = () => {
-    if (!onBubbleChange) return;
-    const next = normalizeBubble(draft);
-    if (next === normalizeBubble(bubble)) return;
-    onBubbleChange(next);
-  };
 
   const buildCtx = useMemo<BuildAvailabilityContext>(
     () => ({
@@ -230,7 +185,7 @@ export function SelfToolCard({
 
   return (
     <div className="pointer-events-auto flex w-56 max-h-[min(320px,70vh)] flex-col overflow-hidden rounded-xl border border-stone-200 bg-white/95 shadow-lg backdrop-blur">
-      <div className="shrink-0 p-3 pb-2">
+      <div className="shrink-0 border-b border-stone-100 p-3 pb-2">
         <div className="mb-1 flex min-w-0 items-center gap-2">
           <EmojiFace emoji={face} size={32} />
           <p className="truncate text-sm font-medium text-pink-600">{name}</p>
@@ -240,86 +195,12 @@ export function SelfToolCard({
         </p>
       </div>
 
-      <div className="shrink-0 grid grid-cols-3 gap-1 border-y border-stone-100 px-2 py-1.5">
-        {(Object.keys(TAB_META) as SelfTab[]).map((key) => {
-          const meta = TAB_META[key];
-          const active = tab === key;
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setTab(key)}
-              className={`rounded-md px-1 py-1 text-[11px] font-medium ${
-                active ? meta.active : meta.idle
-              }`}
-            >
-              {meta.label}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto p-3 pt-2">
-        {tab === "profile" && onEmojiChange ? (
-          <div>
-            <p className="mb-1.5 text-[11px] text-stone-500">Avatar</p>
-            <div className="flex flex-wrap gap-1">
-              {AVATAR_EMOJI_CHOICES.map((e) => (
-                <button
-                  key={e}
-                  type="button"
-                  disabled={busy}
-                  onClick={() => onEmojiChange(e)}
-                  className={`flex h-7 w-7 items-center justify-center text-sm disabled:opacity-40 ${
-                    e === face
-                      ? "bg-stone-100 ring-1 ring-stone-400"
-                      : "hover:bg-stone-50"
-                  }`}
-                  aria-label={`Choose ${e}`}
-                >
-                  {e}
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
-        {tab === "bubble" && onBubbleChange ? (
-          <div>
-            <div className="mb-1 flex items-center justify-between gap-2">
-              <p className="text-[11px] text-stone-500">Message</p>
-              <p className="text-[10px] text-stone-400">
-                {draft.length}/{BUBBLE_MAX}
-              </p>
-            </div>
-            <textarea
-              value={draft}
-              disabled={busy}
-              maxLength={BUBBLE_MAX}
-              rows={3}
-              placeholder="Say something…"
-              onChange={(e) => setDraft(e.target.value.slice(0, BUBBLE_MAX))}
-              onBlur={saveBubble}
-              className="w-full resize-none rounded-lg border border-pink-200 bg-white px-2 py-1.5 text-[11px] text-stone-800 placeholder:text-stone-400 focus:border-pink-400 focus:outline-none disabled:opacity-40"
-            />
-            <button
-              type="button"
-              disabled={busy}
-              onClick={saveBubble}
-              className="mt-1.5 w-full rounded-lg border border-pink-200 bg-pink-50 px-2 py-1 text-[11px] text-pink-700 hover:bg-pink-100 disabled:opacity-40"
-            >
-              Save bubble
-            </button>
-          </div>
-        ) : null}
-
-        {tab === "build" && onBuildSelect ? (
-          <BuildGrid
-            ctx={buildCtx}
-            busy={busy}
-            onSelect={onBuildSelect}
-          />
-        ) : null}
+      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        {onBuildSelect ? (
+          <BuildGrid ctx={buildCtx} busy={busy} onSelect={onBuildSelect} />
+        ) : (
+          <p className="text-[11px] text-stone-400">No build actions</p>
+        )}
       </div>
     </div>
   );
@@ -469,6 +350,8 @@ export function BuildNameDialog({
           disabled={busy}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
+            // Ignore Enter while IME is composing (e.g. Chinese candidate confirm).
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
             if (e.key === "Enter" && valid && !busy) onConfirm(trimmed);
             if (e.key === "Escape") onCancel();
           }}
