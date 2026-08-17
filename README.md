@@ -73,9 +73,29 @@ Settlement primarily happens on read; local/dev works without Cron. In productio
 
 ### World & vision
 
-- Shared procedural map **8000×8000**, seeded by `WORLD_SEED` (same seed → same terrain).
+- Shared procedural map **8000×8000**, seeded by `WORLD_SEED` (same seed → same terrain). Terrain is generated from seed (not stored in the DB).
 - Fog of war: you only see tiles you have explored. Vision radius is **20**.
 - New travelers spawn near the map center with **200** gold and **20** food.
+
+#### Terrain types & mix
+
+Approximate share of the full map (noise-based; varies slightly by seed):
+
+| Terrain | Role | Approx. share |
+|---------|------|----------------|
+| **Water** | Ocean (low elevation) + inland lakes | **~32–38%** of map |
+| **Land** (below) | Everything else | **~62–68%** of map |
+
+Of **land** tiles (generator targets):
+
+| Terrain | Notes | Approx. share of land |
+|---------|-------|------------------------|
+| **Grass** | Default plains; towns & farms | **~42%** |
+| **Forest** | Moister inland; wood nodes more common | **~28%** |
+| **Desert** | Arid inland + beach / lakeside sand (fisheries) | **~18%** |
+| **Mountain** | High elevation; ore / stone nodes | **~12%** |
+
+Resource nodes on land (sparse overlays): **ore** / **stone** on mountains, **wood** on forest (and rarely grass), **stone** on desert. Mines convert these into gold during economy cycles.
 
 ### Travel
 
