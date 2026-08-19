@@ -1,5 +1,6 @@
 export const MAP_SIZE = 8000;
 export const MAP_CENTER = Math.floor(MAP_SIZE / 2); // 4000
+export const MAP_TILE_COUNT = MAP_SIZE * MAP_SIZE;
 export const VISION_RADIUS = 20;
 export const CHUNK_SIZE = 32;
 
@@ -16,16 +17,30 @@ export const WAYPOINT_COST = 100;
 /** Alias: flag build cost (same as legacy waypoint). */
 export const FLAG_COST = WAYPOINT_COST;
 export const WAYPOINT_TOLL = 10;
-export const MINE_COST = 500;
+/** Alias: flag influence toll. */
+export const FLAG_TOLL = WAYPOINT_TOLL;
+/** Town influence: drinking / reveling spend. */
+export const TOWN_TOLL = 100;
 
-/**
- * Flag / town spacing: any 20×20 window may contain at most one.
- * Chebyshev distance ≤ 19 ⇒ both fit in some 20×20 → rejected.
- */
-export const STRUCTURE_SPACING_RADIUS = 19;
+/** Gold paid to a worker each full minute on the job. */
+export const WORK_GOLD_PER_MINUTE = 1;
+/** Materials granted to the workplace owner when someone starts working. */
+export const WORK_OWNER_GRANT = 5;
+
+/** Town / mine / farm share this gold cost. */
+export const TOWN_COST = 500;
+export const MINE_COST = 500;
+export const FARM_COST = 500;
+export const LUMBER_COST = 500;
+
+/** Instant grant when a quarry / farm / lumber camp is built. */
+export const PRODUCER_GRANT = 10;
+/** Town recipe: one cycle of each producer. */
+export const TOWN_MAT_COST = 10;
+export const TOWN_POP_GRANT = 10;
 
 export const INITIAL_GOLD = 200;
-export const INITIAL_FOOD = 20;
+export const INITIAL_FOOD = 0;
 
 /** Participation XP — never decreases; independent of gold. */
 export const XP_PER_STEP = 1;

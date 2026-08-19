@@ -9,6 +9,8 @@ import { TRAVEL_SECONDS_PER_TILE, VISION_RADIUS } from "@/lib/map/constants";
 import { listFriends } from "@/lib/game/social";
 import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
 import { normalizeBubble, normalizePlayerEmoji } from "@/lib/game/playerStyle";
+import { getWorkJobView } from "@/lib/game/work";
+import { countExploredCells } from "@/lib/map/explore";
 
 export async function GET() {
   try {
@@ -60,6 +62,8 @@ export async function GET() {
     }
 
     const friends = await listFriends(db, playerId);
+    const work = await getWorkJobView(db, playerId);
+    const exploredCells = await countExploredCells(db, playerId, world.id);
 
     return NextResponse.json({
       player: {
@@ -69,16 +73,19 @@ export async function GET() {
         y: player.y,
         gold: player.gold,
         xp: player.xp,
+        exploredCells,
         stone: player.stone,
         wood: player.wood,
-        ore: player.ore,
         food: player.food,
+        population: player.ore,
+        ore: player.ore,
         status: player.status,
         emoji: normalizePlayerEmoji(player.emoji),
         bubble: normalizeBubble(player.bubble),
         currentMapId: world.id,
       },
       travel,
+      work,
       friends,
       map: {
         id: world.id,

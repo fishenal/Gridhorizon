@@ -1,4 +1,4 @@
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import type { Db } from "@/lib/db";
 import { exploredChunks } from "@/lib/db/schema";
 import { CHUNK_SIZE } from "./constants";
@@ -41,6 +41,77 @@ export function mergeBits(a: Uint8Array, b: Uint8Array): Uint8Array {
   const out = emptyBitmap();
   for (let i = 0; i < BYTES; i++) out[i] = a[i]! | b[i]!;
   return out;
+}
+
+const POPCOUNT8 = Uint8Array.from({ length: 256 }, (_, i) => {
+  let n = 0;
+  let v = i;
+  while (v) {
+    n += v & 1;
+    v >>= 1;
+  }
+  return n;
+});
+
+export function countBitmapBits(bits: Uint8Array): number {
+  let n = 0;
+  const len = Math.min(bits.length, BYTES);
+  for (let i = 0; i < len; i++) n += POPCOUNT8[bits[i]!]!;
+  return n;
+}
+
+export function countEncodedBitmapBits(b64: string): number {
+  return countBitmapBits(decodeBitmap(b64));
+}
+
+export async function countExploredCells(
+  db: Db,
+  playerId: number,
+  mapId: number = DEFAULT_MAP_ID,
+): Promise<number> {
+  const rows = await db
+    .select({ bitmap: exploredChunks.bitmap })
+    .from(exploredChunks)
+    .where(
+      and(
+        eq(exploredChunks.playerId, playerId),
+        eq(exploredChunks.mapId, mapId),
+      ),
+    );
+  let n = 0;
+  for (const row of rows) n += countEncodedBitmapBits(row.bitmap);
+  return n;
+}
+
+export async function countExploredCellsByPlayer(
+  db: Db,
+  playerIds: number[],
+  mapId: number = DEFAULT_MAP_ID,
+): Promise<Map<number, number>> {
+  const counts = new Map<number, number>();
+  if (playerIds.length === 0) return counts;
+  for (const id of playerIds) counts.set(id, 0);
+
+  const rows = await db
+    .select({
+      playerId: exploredChunks.playerId,
+      bitmap: exploredChunks.bitmap,
+    })
+    .from(exploredChunks)
+    .where(
+      and(
+        eq(exploredChunks.mapId, mapId),
+        inArray(exploredChunks.playerId, playerIds),
+      ),
+    );
+
+  for (const row of rows) {
+    counts.set(
+      row.playerId,
+      (counts.get(row.playerId) ?? 0) + countEncodedBitmapBits(row.bitmap),
+    );
+  }
+  return counts;
 }
 
 export async function isExplored(

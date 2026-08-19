@@ -46,6 +46,11 @@ export type TollMessage = {
   type: "toll";
   toPlayerId: number;
   amount: number;
+  fromPlayerId?: number;
+  fromPlayerName?: string;
+  buildingType?: string;
+  buildingName?: string | null;
+  buildingId?: number;
 };
 
 export type MapRealtimeMessage =

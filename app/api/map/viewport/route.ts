@@ -181,9 +181,13 @@ export async function GET(req: Request) {
                   b.tollRadius ??
                   (b.type === "flag" ||
                   b.type === "waypoint" ||
-                  b.type === "town"
+                  b.type === "town" ||
+                  b.type === "mine" ||
+                  b.type === "farm" ||
+                  b.type === "lumber"
                     ? FLAG_RANGE_RADIUS
                     : null),
+                tollAmount: b.tollAmount,
               }
             : null,
           claim: c

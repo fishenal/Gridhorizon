@@ -2,6 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { buildingEmoji } from "@/lib/game/playerStyle";
+import { formatTollNotice } from "@/lib/game/tollNotice";
+import { workplaceLabel } from "@/lib/game/workplaceMeta";
+import {
+  WORK_GOLD_PER_MINUTE,
+  WORK_OWNER_GRANT,
+} from "@/lib/map/constants";
 
 export type ActivityEntry = {
   id: number;
@@ -17,6 +23,9 @@ type Props = {
   localLogs?: ActivityEntry[];
   /** Called after server fetch with local ids that matched server rows */
   onLocalLogsMatched?: (ids: number[]) => void;
+  workBusy?: boolean;
+  activeWorkBuildingId?: number | null;
+  onAcceptWork?: (buildingId: number) => void;
 };
 
 function asPoint(v: unknown): { x: number; y: number } | null {
@@ -71,6 +80,7 @@ function formatActivity(entry: ActivityEntry): string {
     }
     case "toll_paid": {
       const amount = typeof p.amount === "number" ? p.amount : 0;
+      const town = p.buildingType === "town";
       const kind = buildingEmoji(String(p.buildingType ?? ""));
       const name =
         typeof p.buildingName === "string" && p.buildingName
@@ -81,12 +91,14 @@ function formatActivity(entry: ActivityEntry): string {
           ? p.ownerName
           : "someone";
       const at = asPoint(p.at);
-      return `Paid ${amount} gold toll at ${kind}${name} (${owner})${
-        at ? ` · (${at.x},${at.y})` : ""
-      }`;
+      const where = `${kind}${name} (${owner})${at ? ` · (${at.x},${at.y})` : ""}`;
+      return town
+        ? `Spent ${amount} gold drinking at ${where}`
+        : `Paid ${amount} gold toll at ${where}`;
     }
     case "toll_received": {
       const amount = typeof p.amount === "number" ? p.amount : 0;
+      const town = p.buildingType === "town";
       const kind = buildingEmoji(String(p.buildingType ?? ""));
       const name =
         typeof p.buildingName === "string" && p.buildingName
@@ -97,9 +109,41 @@ function formatActivity(entry: ActivityEntry): string {
           ? p.fromPlayerName
           : "a traveler";
       const at = asPoint(p.at);
-      return `Received ${amount} gold toll at ${kind}${name} from ${from}${
-        at ? ` · (${at.x},${at.y})` : ""
-      }`;
+      const where = `${kind}${name}${at ? ` · (${at.x},${at.y})` : ""}`;
+      return town
+        ? `${from} spent ${amount} gold drinking at ${where}`
+        : `Received ${amount} gold toll at ${where} from ${from}`;
+    }
+    case "work_offer": {
+      const owner =
+        typeof p.ownerName === "string" && p.ownerName
+          ? p.ownerName
+          : "someone";
+      const kind = workplaceLabel(String(p.buildingType ?? ""));
+      const name =
+        typeof p.buildingName === "string" && p.buildingName
+          ? ` ${p.buildingName}`
+          : "";
+      const status = String(p.status ?? "pending");
+      if (status === "accepted") {
+        return `Started working at ${owner}'s ${kind}${name}.`;
+      }
+      return `Entered ${owner}'s ${kind}${name}. Work here for ${WORK_GOLD_PER_MINUTE} gold/min? Owner gains ${WORK_OWNER_GRANT} immediately.`;
+    }
+    case "toll_notice": {
+      const role = p.role === "owner" ? "owner" : "payer";
+      const { body } = formatTollNotice({
+        id: 0,
+        role,
+        buildingType: String(p.buildingType ?? "flag"),
+        buildingName:
+          typeof p.buildingName === "string" ? p.buildingName : null,
+        otherPlayerName: String(
+          p.otherPlayerName ?? (role === "owner" ? "A traveler" : "someone"),
+        ),
+        amount: typeof p.amount === "number" ? p.amount : 0,
+      });
+      return body;
     }
     default:
       return entry.type;
@@ -130,9 +174,12 @@ export function activityFingerprint(entry: ActivityEntry): string {
       return `toll_paid:${p.buildingId}:${p.amount}:${at?.x},${at?.y}`;
     }
     case "toll_received": {
-      const at = asPoint(p.at);
-      return `toll_received:${p.buildingId}:${p.fromPlayerId}:${p.amount}:${at?.x},${at?.y}`;
+      return `toll_received:${p.buildingId}:${p.fromPlayerId}:${p.amount}`;
     }
+    case "work_offer":
+      return `work_offer:${p.buildingId}:${entry.id}`;
+    case "toll_notice":
+      return `toll_notice:${p.role}:${p.buildingId}:${p.amount}:${entry.id}`;
     default:
       return `${entry.type}:${JSON.stringify(p)}`;
   }
@@ -151,10 +198,40 @@ export function makeLocalActivity(
   };
 }
 
+function logCardClass(entry: ActivityEntry): string {
+  const p = entry.payload;
+  const type = entry.type;
+  if (type === "work_offer") {
+    const accepted = p.status === "accepted";
+    return accepted
+      ? "border-sky-200 bg-sky-50/70"
+      : "border-sky-300 bg-sky-100";
+  }
+  if (type === "toll_notice" || type === "toll_paid" || type === "toll_received") {
+    const town = p.buildingType === "town";
+    const owner = type === "toll_received" || p.role === "owner";
+    if (owner) {
+      return town
+        ? "border-emerald-300 bg-emerald-100"
+        : "border-lime-300 bg-lime-100";
+    }
+    return town
+      ? "border-rose-300 bg-rose-100"
+      : "border-amber-300 bg-amber-100";
+  }
+  if (type === "build") {
+    return "border-teal-200 bg-teal-50";
+  }
+  return "border-stone-100 bg-white/80";
+}
+
 export function JournalPanel({
   refreshToken = 0,
   localLogs = [],
   onLocalLogsMatched,
+  workBusy,
+  activeWorkBuildingId,
+  onAcceptWork,
 }: Props) {
   const [serverLogs, setServerLogs] = useState<ActivityEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -219,19 +296,40 @@ export function JournalPanel({
           <p className="px-1 py-2 text-[11px] text-stone-400">No activity yet</p>
         ) : (
           <ul className="space-y-2">
-            {displayLogs.map((entry) => (
-              <li
-                key={entry.id}
-                className="rounded-lg border border-stone-100 bg-white/80 px-2 py-1.5"
-              >
-                <p className="text-[11px] leading-snug text-stone-800">
-                  {formatActivity(entry)}
-                </p>
-                <p className="mt-0.5 text-[10px] text-stone-400">
-                  {formatTime(entry.createdAt)}
-                </p>
-              </li>
-            ))}
+            {displayLogs.map((entry) => {
+              const p = entry.payload;
+              const buildingId =
+                typeof p.buildingId === "number" ? p.buildingId : null;
+              const offerPending =
+                entry.type === "work_offer" &&
+                p.status !== "accepted" &&
+                buildingId != null;
+              const alreadyHere =
+                offerPending && activeWorkBuildingId === buildingId;
+              return (
+                <li
+                  key={entry.id}
+                  className={`rounded-lg border px-2 py-1.5 ${logCardClass(entry)}`}
+                >
+                  <p className="text-[11px] leading-snug text-stone-800">
+                    {formatActivity(entry)}
+                  </p>
+                  {offerPending && onAcceptWork ? (
+                    <button
+                      type="button"
+                      disabled={workBusy || alreadyHere}
+                      onClick={() => onAcceptWork(buildingId)}
+                      className="mt-1.5 rounded border border-sky-500 bg-sky-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-sky-700 disabled:opacity-50"
+                    >
+                      {alreadyHere ? "Working" : "Work"}
+                    </button>
+                  ) : null}
+                  <p className="mt-0.5 text-[10px] text-stone-400">
+                    {formatTime(entry.createdAt)}
+                  </p>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

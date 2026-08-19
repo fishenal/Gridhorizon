@@ -40,7 +40,7 @@ export function MovePad({
   const [dx, setDx] = useState(0);
   const [dy, setDy] = useState(-1);
   /** String draft so clearing the field does not coerce to 0. */
-  const [stepsText, setStepsText] = useState("10");
+  const [stepsText, setStepsText] = useState("100");
   const [submitting, setSubmitting] = useState(false);
   const [stepsError, setStepsError] = useState("");
 

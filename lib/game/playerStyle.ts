@@ -37,6 +37,7 @@ const BUILDING_EMOJI: Record<string, string> = {
   town: "🏘️",
   mine: "⛏️",
   farm: "🌾",
+  lumber: "🪵",
   fishery: "🎣",
 };
 

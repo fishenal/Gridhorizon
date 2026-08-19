@@ -3,32 +3,34 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/lib/auth";
 import { getDb } from "@/lib/db";
-import { buildings, players, tileClaims } from "@/lib/db/schema";
+import { buildings, players } from "@/lib/db/schema";
 import { settlePlayer } from "@/lib/game/settle";
 import { logBuild } from "@/lib/game/activityLog";
-import { FLAG_COST, MINE_COST } from "@/lib/map/constants";
-import { FLAG_RANGE_RADIUS } from "@/lib/game/playerStyle";
 import {
-  hasNearbyStructure,
-  STRUCTURE_TOO_CLOSE_MSG,
-} from "@/lib/game/structureSpacing";
+  applyBuildWallet,
+  getBuildAvailability,
+  getBuildEntry,
+  type BuildKind,
+} from "@/lib/game/buildCatalog";
+import { BUILDING_NAME_MAX } from "@/lib/game/buildingName";
+import { FLAG_RANGE_RADIUS } from "@/lib/game/playerStyle";
+import { FLAG_TOLL, TOWN_TOLL } from "@/lib/map/constants";
 import { addXp, XP_BUILD } from "@/lib/game/xp";
-import { generateTile, hasWaterNeighbor } from "@/lib/map/generator";
+import { generateTile } from "@/lib/map/generator";
 import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
 
 const bodySchema = z.object({
   action: z.enum([
-    "claim",
     "mine",
     "farm",
-    "fishery",
+    "lumber",
     "town",
     "flag",
-    "waypoint", // legacy alias → flag
+    "waypoint",
   ]),
   x: z.number().int(),
   y: z.number().int(),
-  name: z.string().trim().min(1).max(24).optional(),
+  name: z.string().trim().min(1).max(BUILDING_NAME_MAX).optional(),
   message: z.string().max(200).optional(),
 });
 
@@ -45,6 +47,7 @@ export async function POST(req: Request) {
 
   let { action, x, y, name, message } = parsed.data;
   if (action === "waypoint") action = "flag";
+  const kind = action as BuildKind;
 
   const db = getDb();
   await ensureDefaultMap(db);
@@ -75,232 +78,88 @@ export async function POST(req: Request) {
       eq(buildings.y, y),
     ),
   });
-  const existingClaim = await db.query.tileClaims.findFirst({
-    where: and(
-      eq(tileClaims.mapId, mapId),
-      eq(tileClaims.x, x),
-      eq(tileClaims.y, y),
-    ),
+
+  const gate = getBuildAvailability(kind, {
+    isLand: tile.isLand,
+    occupied: Boolean(existingBuilding),
+    gold: player.gold,
+    stone: player.stone,
+    wood: player.wood,
+    food: player.food,
+    population: player.ore,
   });
-
-  if (action === "flag") {
-    const flagName = (name ?? message ?? "").trim();
-    if (flagName.length < 1 || flagName.length > 24) {
-      return NextResponse.json(
-        { error: "Name required (1–24 chars)" },
-        { status: 400 },
-      );
-    }
-    if (existingBuilding) {
-      return NextResponse.json({ error: "Tile occupied" }, { status: 400 });
-    }
-    if (await hasNearbyStructure(db, mapId, x, y)) {
-      return NextResponse.json(
-        { error: STRUCTURE_TOO_CLOSE_MSG },
-        { status: 400 },
-      );
-    }
-    if (player.gold < FLAG_COST) {
-      return NextResponse.json({ error: "Need 100 gold" }, { status: 400 });
-    }
-    await db
-      .update(players)
-      .set({ gold: player.gold - FLAG_COST })
-      .where(eq(players.id, playerId));
-    const [row] = await db
-      .insert(buildings)
-      .values({
-        mapId,
-        x,
-        y,
-        ownerId: playerId,
-        type: "flag",
-        name: flagName,
-        message: flagName,
-        tollRadius: FLAG_RANGE_RADIUS,
-      })
-      .returning({ id: buildings.id });
-    await addXp(db, playerId, XP_BUILD);
-    await logBuild(db, playerId, mapId, {
-      buildingType: "flag",
-      name: flagName,
-      x,
-      y,
-      buildingId: row?.id,
-    });
-    return NextResponse.json({ ok: true });
-  }
-
-  if (action === "town") {
-    const townName = (name ?? message ?? "").trim();
-    if (townName.length < 1 || townName.length > 24) {
-      return NextResponse.json(
-        { error: "Name required (1–24 chars)" },
-        { status: 400 },
-      );
-    }
-    if (tile.terrain !== "grass") {
-      return NextResponse.json(
-        { error: "Towns need grassland" },
-        { status: 400 },
-      );
-    }
-    if (existingBuilding) {
-      return NextResponse.json({ error: "Tile occupied" }, { status: 400 });
-    }
-    if (await hasNearbyStructure(db, mapId, x, y)) {
-      return NextResponse.json(
-        { error: STRUCTURE_TOO_CLOSE_MSG },
-        { status: 400 },
-      );
-    }
-    const [row] = await db
-      .insert(buildings)
-      .values({
-        mapId,
-        x,
-        y,
-        ownerId: playerId,
-        type: "town",
-        name: townName,
-        message: townName,
-        tollRadius: FLAG_RANGE_RADIUS,
-      })
-      .returning({ id: buildings.id });
-    await addXp(db, playerId, XP_BUILD);
-    await logBuild(db, playerId, mapId, {
-      buildingType: "town",
-      name: townName,
-      x,
-      y,
-      buildingId: row?.id,
-    });
-    return NextResponse.json({ ok: true });
-  }
-
-  if (action === "claim") {
-    if (!tile.isLand) {
-      return NextResponse.json(
-        { error: "Water cannot be claimed" },
-        { status: 400 },
-      );
-    }
-    if (existingClaim) {
-      return NextResponse.json({ error: "Already claimed" }, { status: 400 });
-    }
-    await db.insert(tileClaims).values({ mapId, x, y, ownerId: playerId });
-    return NextResponse.json({ ok: true });
-  }
-
-  if (!tile.isLand) {
-    return NextResponse.json({ error: "Need land" }, { status: 400 });
-  }
-  if (!existingClaim || existingClaim.ownerId !== playerId) {
+  if (!gate.ok) {
     return NextResponse.json(
-      { error: "Claim the tile first" },
+      { error: gate.reason ?? "Cannot build" },
       { status: 400 },
     );
   }
-  if (existingBuilding) {
-    return NextResponse.json({ error: "Tile occupied" }, { status: 400 });
+
+  const entry = getBuildEntry(kind);
+  const buildName = (name ?? message ?? "").trim();
+  if (entry.needsName && (buildName.length < 1 || buildName.length > BUILDING_NAME_MAX)) {
+    return NextResponse.json(
+      { error: `Name required (1–${BUILDING_NAME_MAX} chars)` },
+      { status: 400 },
+    );
   }
 
-  if (action === "mine") {
-    if (tile.resourceType === "none") {
-      return NextResponse.json({ error: "No resource here" }, { status: 400 });
-    }
-    if (player.gold < MINE_COST) {
-      return NextResponse.json({ error: "Need 500 gold" }, { status: 400 });
-    }
-    await db
-      .update(players)
-      .set({ gold: player.gold - MINE_COST })
-      .where(eq(players.id, playerId));
-    const [row] = await db
-      .insert(buildings)
-      .values({
-        mapId,
-        x,
-        y,
-        ownerId: playerId,
-        type: "mine",
-      })
-      .returning({ id: buildings.id });
-    await addXp(db, playerId, XP_BUILD);
-    await logBuild(db, playerId, mapId, {
-      buildingType: "mine",
-      name: null,
+  const next = applyBuildWallet(
+    {
+      gold: player.gold,
+      stone: player.stone,
+      wood: player.wood,
+      food: player.food,
+      population: player.ore,
+    },
+    kind,
+  );
+
+  await db
+    .update(players)
+    .set({
+      gold: next.gold,
+      stone: next.stone,
+      wood: next.wood,
+      food: next.food,
+      ore: next.population,
+    })
+    .where(eq(players.id, playerId));
+
+  const named = entry.needsName ? buildName : null;
+  const [row] = await db
+    .insert(buildings)
+    .values({
+      mapId,
       x,
       y,
-      buildingId: row?.id,
-    });
-    return NextResponse.json({ ok: true });
-  }
+      ownerId: playerId,
+      type: kind,
+      name: named,
+      message: named,
+      tollRadius:
+        kind === "flag" ||
+        kind === "town" ||
+        kind === "mine" ||
+        kind === "farm" ||
+        kind === "lumber"
+          ? FLAG_RANGE_RADIUS
+          : null,
+      tollAmount:
+        kind === "town" ? TOWN_TOLL : kind === "flag" ? FLAG_TOLL : null,
+    })
+    .returning({ id: buildings.id });
 
-  if (action === "farm") {
-    if (tile.terrain !== "grass") {
-      return NextResponse.json(
-        { error: "Farms need grassland" },
-        { status: 400 },
-      );
-    }
-    if (tile.resourceType !== "none") {
-      return NextResponse.json(
-        { error: "Resource tiles use mines" },
-        { status: 400 },
-      );
-    }
-    const [row] = await db
-      .insert(buildings)
-      .values({
-        mapId,
-        x,
-        y,
-        ownerId: playerId,
-        type: "farm",
-      })
-      .returning({ id: buildings.id });
-    await addXp(db, playerId, XP_BUILD);
-    await logBuild(db, playerId, mapId, {
-      buildingType: "farm",
-      name: null,
-      x,
-      y,
-      buildingId: row?.id,
-    });
-    return NextResponse.json({ ok: true });
-  }
-
-  if (action === "fishery") {
-    if (
-      tile.terrain !== "desert" ||
-      !hasWaterNeighbor(x, y, world.seed)
-    ) {
-      return NextResponse.json(
-        { error: "Fisheries need beach / lakeside sand" },
-        { status: 400 },
-      );
-    }
-    const [row] = await db
-      .insert(buildings)
-      .values({
-        mapId,
-        x,
-        y,
-        ownerId: playerId,
-        type: "fishery",
-      })
-      .returning({ id: buildings.id });
-    await addXp(db, playerId, XP_BUILD);
-    await logBuild(db, playerId, mapId, {
-      buildingType: "fishery",
-      name: null,
-      x,
-      y,
-      buildingId: row?.id,
-    });
-    return NextResponse.json({ ok: true });
-  }
-
-  return NextResponse.json({ error: "Unknown action" }, { status: 400 });
+  await addXp(db, playerId, XP_BUILD);
+  await logBuild(db, playerId, mapId, {
+    buildingType: kind,
+    name: named,
+    x,
+    y,
+    buildingId: row?.id,
+  });
+  return NextResponse.json({
+    ok: true,
+    wallet: next,
+  });
 }

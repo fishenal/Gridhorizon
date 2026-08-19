@@ -37,7 +37,7 @@ export const players = pgTable("players", {
   xp: integer("xp").notNull().default(0),
   stone: integer("stone").notNull().default(0),
   wood: integer("wood").notNull().default(0),
-  ore: integer("ore").notNull().default(0),
+  ore: integer("ore").notNull().default(0), // population (endgame score)
   food: integer("food").notNull().default(20),
   status: text("status").notNull().default("idle"), // idle | traveling
   /** Player avatar emoji (shown on map; boat on water overrides display). */
@@ -116,7 +116,7 @@ export const buildings = pgTable(
     ownerId: integer("owner_id")
       .notNull()
       .references(() => players.id, { onDelete: "cascade" }),
-    /** flag | town | mine | farm | fishery | waypoint (legacy) */
+    /** flag | town | mine (quarry) | farm | lumber | fishery (legacy) | waypoint (legacy) */
     type: text("type").notNull(),
     level: integer("level").notNull().default(1),
     /** Display name for flag / town */
@@ -156,6 +156,32 @@ export const travelJobs = pgTable("travel_jobs", {
     .notNull()
     .defaultNow(),
 });
+
+/** One active workplace job per player (farm / quarry / lumber). */
+export const workJobs = pgTable(
+  "work_jobs",
+  {
+    id: serial("id").primaryKey(),
+    playerId: integer("player_id")
+      .notNull()
+      .references(() => players.id, { onDelete: "cascade" })
+      .unique(),
+    buildingId: integer("building_id")
+      .notNull()
+      .references(() => buildings.id, { onDelete: "cascade" }),
+    mapId: integer("map_id")
+      .notNull()
+      .default(1)
+      .references(() => maps.id),
+    startedAt: timestamp("started_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastSettledAt: timestamp("last_settled_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("work_jobs_building_idx").on(t.buildingId)],
+);
 
 export const friendships = pgTable(
   "friendships",
