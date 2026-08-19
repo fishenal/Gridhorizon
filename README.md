@@ -2,7 +2,7 @@
 
 **Welcome to a vast and lonely world.**
 
-Gridhorizon is an asynchronous open-world exploration game on a procedural **8000×8000** map. You travel tile by tile (even while offline), lift fog of war, claim land, build economies, and occasionally meet other travelers in the same lonely expanse.
+Gridhorizon is an asynchronous open-world exploration game on a procedural **8000×8000** map. You travel tile by tile (even while offline), lift fog of war, build, and occasionally meet other travelers in the same lonely expanse.
 
 It is built as a playable prototype and an open collaboration: Next.js (App Router), Neon Postgres + Drizzle, Auth.js, and Ably for realtime presence / map sync. The live site is deployed on [Vercel](https://vercel.com).
 
@@ -90,12 +90,12 @@ Of **land** tiles (generator targets):
 
 | Terrain | Notes | Approx. share of land |
 |---------|-------|------------------------|
-| **Grass** | Default plains; towns & farms | **~42%** |
+| **Grass** | Default plains | **~42%** |
 | **Forest** | Moister inland; wood nodes more common | **~28%** |
-| **Desert** | Arid inland + beach / lakeside sand (fisheries) | **~18%** |
+| **Desert** | Arid inland + beach / lakeside sand | **~18%** |
 | **Mountain** | High elevation; ore / stone nodes | **~12%** |
 
-Resource nodes on land (sparse overlays): **ore** / **stone** on mountains, **wood** on forest (and rarely grass), **stone** on desert. Mines convert these into gold during economy cycles.
+Resource nodes on land (sparse overlays): **ore** / **stone** on mountains, **wood** on forest (and rarely grass), **stone** on desert. Mines on a resource tile convert that resource into gold during economy cycles.
 
 ### Travel
 
@@ -106,12 +106,15 @@ Resource nodes on land (sparse overlays): **ore** / **stone** on mountains, **wo
 
 ### Building & economy
 
-- **Flag** (100 gold): claim influence / toll zone. At most one flag or town in any **20×20** window.
-- **Town** (grassland): passive gold; adjacent towns form clusters with higher yield.
-- **Mine** (500 gold): on a claimed tile that has a resource (stone / wood / ore) → gold per economy cycle.
-- **Farm**: claimed grassland without a resource node.
-- **Fishery**: claimed desert shore / lakeside sand.
-- Economy cycles settle on the order of about **60 seconds** when the player state is read (mines/towns produce gold). Placing a structure also grants build XP.
+Stand on an empty tile to build. The only occupancy rule is **that tile has no building yet** (yours or anyone else’s). Resources are granted **immediately on build** (no timed production).
+
+- **Flag** 🪙100: any tile, including water. Names the flag; influence / toll zone.
+- **Quarry** 🪙500: any land tile. Instantly grants 🪨10.
+- **Farm** 🪙500: any land tile. Instantly grants 🍞10.
+- **Lumber camp** 🪙500: any land tile. Instantly grants 🪵10.
+- **Town** 🪙500 🪨10 🪵10 🍞10: any land tile. Instantly grants 👥10. (One quarry + farm + lumber camp supplies one town.)
+
+🪙 gold comes from travel. 👥 population is the endgame score. Placing a structure also grants ✨ XP.
 
 ### Social
 

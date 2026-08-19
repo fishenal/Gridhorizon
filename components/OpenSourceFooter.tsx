@@ -1,5 +1,7 @@
 const GITHUB_URL = "https://github.com/fishenal/Gridhorizon";
+const ISSUES_URL = "https://github.com/fishenal/Gridhorizon/issues";
 const DISCORD_URL = "https://discord.gg/HxS7Z4p4EP";
+const SUPPORT_URL = "https://www.fishenal.dev/support";
 
 type Props = {
   /** Home hero is dark; play chrome sits on the map backdrop. */
@@ -22,7 +24,6 @@ export function OpenSourceFooter({ tone = "onDark" }: Props) {
       } ${muted}`}
     >
       <p>
-        Open source · recruiting collaborators ·{" "}
         <a
           href={GITHUB_URL}
           target="_blank"
@@ -33,12 +34,30 @@ export function OpenSourceFooter({ tone = "onDark" }: Props) {
         </a>
         {" · "}
         <a
+          href={ISSUES_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={link}
+        >
+          Submit an issue
+        </a>
+        {" · "}
+        <a
           href={DISCORD_URL}
           target="_blank"
           rel="noopener noreferrer"
           className={link}
         >
           Discord
+        </a>
+        {" · "}
+        <a
+          href={SUPPORT_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={link}
+        >
+          Support me
         </a>
       </p>
     </footer>

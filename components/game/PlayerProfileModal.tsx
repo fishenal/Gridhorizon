@@ -5,6 +5,8 @@ import {
   buildingEmoji,
   normalizePlayerEmoji,
 } from "@/lib/game/playerStyle";
+import { ExploredStat } from "@/components/game/ExploredStat";
+import { ResourceRow } from "@/components/game/ResourceRow";
 
 export type PlayerProfileTarget = {
   id: number;
@@ -35,7 +37,12 @@ type ProfileData = {
     status: string;
     online?: boolean;
     xp: number;
+    exploredCells?: number;
     gold: number;
+    stone?: number;
+    wood?: number;
+    food?: number;
+    population?: number;
   };
   buildings: BuildingRow[];
 };
@@ -140,9 +147,24 @@ export function PlayerProfileModal({ target, onClose }: Props) {
               {online && traveling ? " · moving" : ""}
             </p>
             {data ? (
-              <p className="mt-1 text-xs text-stone-600">
-                Gold {data.player.gold} · XP {data.player.xp}
-              </p>
+              <>
+                <ResourceRow
+                  className="mt-1 text-xs text-stone-600"
+                  skipZero={false}
+                  parts={[
+                    ["gold", data.player.gold],
+                    ["stone", data.player.stone ?? 0],
+                    ["wood", data.player.wood ?? 0],
+                    ["food", data.player.food ?? 0],
+                    ["population", data.player.population ?? 0],
+                    ["xp", data.player.xp],
+                  ]}
+                />
+                <ExploredStat
+                  className="mt-1 text-xs text-stone-600"
+                  cells={data.player.exploredCells}
+                />
+              </>
             ) : null}
           </div>
           <button

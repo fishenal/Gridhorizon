@@ -38,6 +38,7 @@ export type ViewportTile =
         message: string | null;
         createdAt?: string | null;
         tollRadius?: number | null;
+        tollAmount?: number | null;
       } | null;
       claim: { ownerId: number; askingPrice: number | null } | null;
     };
@@ -141,6 +142,7 @@ const BUILDING_MARK: Record<string, string> = {
   town: buildingEmoji("town"),
   mine: buildingEmoji("mine"),
   farm: buildingEmoji("farm"),
+  lumber: buildingEmoji("lumber"),
   fishery: buildingEmoji("fishery"),
 };
 
@@ -152,8 +154,16 @@ function isTownType(type: string) {
   return type === "town";
 }
 
+function isWorkplaceType(type: string) {
+  return type === "mine" || type === "farm" || type === "lumber";
+}
+
 function isHoverBuilding(type: string) {
   return isFlagType(type) || isTownType(type);
+}
+
+function hasInfluence(type: string) {
+  return isFlagType(type) || isTownType(type) || isWorkplaceType(type);
 }
 
 function buildingLabel(
@@ -165,14 +175,15 @@ function buildingLabel(
         flag: "Flag",
         waypoint: "Flag",
         town: "Town",
-        mine: "Mine",
+        mine: "Quarry",
         farm: "Farm",
+        lumber: "Lumber",
         fishery: "Fishery",
       } as Record<string, string>
     )[b.type] ?? b.type;
   const name = b.name || b.message;
   const base = name ? `${kind} "${name}"` : kind;
-  if (isFlagType(b.type) || isTownType(b.type)) {
+  if (hasInfluence(b.type)) {
     const side = influenceSide(b.tollRadius ?? FLAG_RANGE_RADIUS);
     return `${base} · Influence ${side}×${side}`;
   }
@@ -314,19 +325,27 @@ export function MapCanvas({
     ];
   }, [player, others]);
 
-  /** Hover-only: tint cells around the selected flag or town. */
-  const influenceSource = useMemo(() => {
-    if (!selectedPoint) return null;
-    if (selectedPoint.type === "flag" || selectedPoint.type === "town") {
-      return {
-        x: selectedPoint.x,
-        y: selectedPoint.y,
-        // Always use current global radius (old DB rows may still store 2)
+  /** Always-on influence: every visible flag / town / workplace. */
+  const influenceZones = useMemo(() => {
+    const zones: Array<{ id: number; x: number; y: number; radius: number }> =
+      [];
+    const seen = new Set<string>();
+    for (const t of tiles) {
+      if (t.fog || !t.building) continue;
+      const b = t.building;
+      if (!hasInfluence(b.type)) continue;
+      const key = b.id > 0 ? `id:${b.id}` : `${t.x},${t.y}:${b.type}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      zones.push({
+        id: b.id,
+        x: t.x,
+        y: t.y,
         radius: FLAG_RANGE_RADIUS,
-      };
+      });
     }
-    return null;
-  }, [selectedPoint]);
+    return zones;
+  }, [tiles]);
 
   useLayoutEffect(() => {
     const wrap = wrapRef.current;
@@ -488,14 +507,18 @@ export function MapCanvas({
               : `(${c.wx}, ${c.wy})`;
             const fontPx = Math.max(10, Math.min(cell * 0.78, 22));
 
-            let inInfluence = false;
-            if (influenceSource) {
+            let influenceLayers = 0;
+            for (const z of influenceZones) {
               const d = Math.max(
-                Math.abs(c.wx - influenceSource.x),
-                Math.abs(c.wy - influenceSource.y),
+                Math.abs(c.wx - z.x),
+                Math.abs(c.wy - z.y),
               );
-              if (d <= influenceSource.radius) inInfluence = true;
+              if (d <= z.radius) influenceLayers += 1;
             }
+            const influenceOpacity =
+              influenceLayers > 0
+                ? Math.min(0.78, 1 - (1 - 0.2) ** influenceLayers)
+                : 0;
 
             const hasPlayer = [player, ...others].some(
               (u) => u.x === c.wx && u.y === c.wy,
@@ -523,13 +546,12 @@ export function MapCanvas({
                   if (isSpecial) handlePointLeave();
                 }}
               >
-                {inInfluence ? (
+                {influenceLayers > 0 ? (
                   <div
                     className="pointer-events-none absolute inset-0"
                     style={{
                       backgroundColor: FLAG_RANGE_TINT,
-                      opacity: 0.32,
-                      boxShadow: `inset 0 0 0 1px ${FLAG_RANGE_TINT}`,
+                      opacity: influenceOpacity,
                     }}
                   />
                 ) : null}

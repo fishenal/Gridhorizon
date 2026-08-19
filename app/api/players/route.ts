@@ -6,6 +6,7 @@ import { players } from "@/lib/db/schema";
 import { normalizeBubble, normalizePlayerEmoji } from "@/lib/game/playerStyle";
 import { isOnlineFromLastSeen } from "@/lib/game/presence";
 import { settleOutstandingTravel } from "@/lib/game/travel";
+import { countExploredCellsByPlayer } from "@/lib/map/explore";
 import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
 
 /** All players on the current map (public fields only). */
@@ -34,12 +35,19 @@ export async function GET() {
         status: players.status,
         xp: players.xp,
         gold: players.gold,
+        ore: players.ore,
         lastSeenAt: players.lastSeenAt,
         createdAt: players.createdAt,
       })
       .from(players)
       .where(eq(players.currentMapId, world.id))
       .orderBy(asc(players.name));
+
+    const exploredByPlayer = await countExploredCellsByPlayer(
+      db,
+      rows.map((p) => p.id),
+      world.id,
+    );
 
     return NextResponse.json({
       players: rows.map((p) => ({
@@ -52,6 +60,8 @@ export async function GET() {
         status: p.status,
         xp: p.xp,
         gold: p.gold,
+        population: p.ore,
+        exploredCells: exploredByPlayer.get(p.id) ?? 0,
         online: isOnlineFromLastSeen(p.lastSeenAt),
         createdAt: p.createdAt.toISOString(),
       })),

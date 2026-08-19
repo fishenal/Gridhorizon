@@ -5,6 +5,7 @@ import { getDb } from "@/lib/db";
 import { buildings, players } from "@/lib/db/schema";
 import { normalizeBubble, normalizePlayerEmoji } from "@/lib/game/playerStyle";
 import { isOnlineFromLastSeen } from "@/lib/game/presence";
+import { countExploredCells } from "@/lib/map/explore";
 import { ensureDefaultMap, getPlayerWorld } from "@/lib/map/world";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -48,6 +49,8 @@ export async function GET(_req: Request, ctx: Ctx) {
       )
       .orderBy(desc(buildings.createdAt));
 
+    const exploredCells = await countExploredCells(db, targetId, world.id);
+
     return NextResponse.json({
       player: {
         id: player.id,
@@ -59,7 +62,12 @@ export async function GET(_req: Request, ctx: Ctx) {
         status: player.status,
         online: isOnlineFromLastSeen(player.lastSeenAt),
         xp: player.xp,
+        exploredCells,
         gold: player.gold,
+        stone: player.stone,
+        wood: player.wood,
+        food: player.food,
+        population: player.ore,
       },
       buildings: rows.map((r) => ({
         id: r.id,

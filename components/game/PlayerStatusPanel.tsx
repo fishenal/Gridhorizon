@@ -6,6 +6,8 @@ import {
   buildingEmoji,
   normalizePlayerEmoji,
 } from "@/lib/game/playerStyle";
+import { ExploredStat } from "@/components/game/ExploredStat";
+import { ResourceRow } from "@/components/game/ResourceRow";
 import { isDeviceGuest } from "@/lib/game/guestIdentity";
 
 type OwnedBuilding = {
@@ -24,12 +26,19 @@ type Props = {
     bubble?: string;
     gold: number;
     xp?: number;
+    exploredCells?: number;
+    stone?: number;
+    wood?: number;
+    food?: number;
+    population?: number;
     x: number;
     y: number;
     status?: string;
   };
-  refreshToken?: number;
+  working?: boolean;
   busy?: boolean;
+  refreshToken?: number;
+  onStopWork?: () => void;
   onNameChange?: (name: string) => void;
   onEmojiChange?: (emoji: string) => void;
   onBubbleChange?: (bubble: string) => void;
@@ -66,8 +75,10 @@ function GearIcon({ className }: { className?: string }) {
 
 export function PlayerStatusPanel({
   player,
+  working = false,
   refreshToken = 0,
   busy,
+  onStopWork,
   onNameChange,
   onEmojiChange,
   onBubbleChange,
@@ -102,7 +113,7 @@ export function PlayerStatusPanel({
 
   return (
     <>
-      <div className="pointer-events-auto flex w-[180px] flex-col overflow-hidden rounded-xl border border-stone-200 bg-white/95 shadow-lg backdrop-blur">
+      <div className="pointer-events-auto flex w-[216px] flex-col overflow-hidden rounded-xl border border-stone-200 bg-white/95 shadow-lg backdrop-blur">
         <div className="border-b border-stone-200 px-3 py-2.5">
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="text-xl leading-none" aria-hidden>
@@ -121,13 +132,42 @@ export function PlayerStatusPanel({
               <GearIcon className="h-3.5 w-3.5" />
             </button>
           </div>
-          <p className="mt-1.5 text-xs text-stone-700">Gold {player.gold}</p>
-          {typeof player.xp === "number" ? (
-            <p className="text-xs text-stone-700">XP {player.xp}</p>
-          ) : null}
-          <p className="text-xs text-stone-500">
-            ({player.x},{player.y})
-            {player.status === "traveling" ? " · moving" : ""}
+          <ResourceRow
+            className="mt-1.5 text-[11px] leading-snug text-stone-700"
+            skipZero={false}
+            parts={[
+              ["gold", player.gold],
+              ["stone", player.stone ?? 0],
+              ["wood", player.wood ?? 0],
+              ["food", player.food ?? 0],
+              ["population", player.population ?? 0],
+              ["xp", player.xp ?? 0],
+            ]}
+          />
+          <ExploredStat
+            className="mt-1 text-[11px] leading-snug text-stone-700"
+            cells={player.exploredCells}
+          />
+          <p className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-xs text-stone-500">
+            <span>
+              ({player.x},{player.y})
+            </span>
+            {player.status === "traveling" ? <span>· moving</span> : null}
+            {working ? (
+              <>
+                <span>· working</span>
+                {onStopWork ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={onStopWork}
+                    className="rounded border border-stone-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
+                  >
+                    Stop working
+                  </button>
+                ) : null}
+              </>
+            ) : null}
           </p>
         </div>
 

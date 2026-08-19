@@ -1,5 +1,5 @@
 import { FLAG_RANGE_RADIUS } from "@/lib/game/playerStyle";
-import { WAYPOINT_TOLL } from "@/lib/map/constants";
+import { TOWN_TOLL, WAYPOINT_TOLL } from "@/lib/map/constants";
 
 export type Point = { x: number; y: number };
 
@@ -23,6 +23,16 @@ export type TollEntry = {
 
 function chebyshev(ax: number, ay: number, bx: number, by: number): number {
   return Math.max(Math.abs(ax - bx), Math.abs(ay - by));
+}
+
+export function isInStructureRange(
+  px: number,
+  py: number,
+  sx: number,
+  sy: number,
+  radius: number,
+): boolean {
+  return chebyshev(px, py, sx, sy) <= radius;
 }
 
 /**
@@ -64,8 +74,13 @@ export function findTollEntries(
   return hits;
 }
 
-export function defaultTollAmount(amount: number | null | undefined): number {
-  return amount ?? WAYPOINT_TOLL;
+export function defaultTollAmount(
+  amount: number | null | undefined,
+  type?: string,
+): number {
+  if (amount != null) return amount;
+  if (type === "town") return TOWN_TOLL;
+  return WAYPOINT_TOLL;
 }
 
 export function defaultTollRadius(radius: number | null | undefined): number {

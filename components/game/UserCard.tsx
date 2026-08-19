@@ -1,7 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import type { ResourceType, Terrain } from "@/lib/map/generator";
+import { useEffect, useMemo, useState } from "react";
 import {
   FLAG_RANGE_RADIUS,
   influenceSide,
@@ -14,7 +13,15 @@ import {
   type BuildAvailabilityContext,
   type BuildKind,
 } from "@/lib/game/buildCatalog";
+import {
+  BUILDING_NAME_MAX,
+  isNamedBuildKind,
+  suggestedBuildingName,
+} from "@/lib/game/buildingName";
+import { ExploredStat } from "@/components/game/ExploredStat";
+import { ResourceRow } from "@/components/game/ResourceRow";
 import type { SelectedFlag, SelectedTown } from "@/components/game/MapCanvas";
+import { FLAG_TOLL, TOWN_TOLL } from "@/lib/map/constants";
 
 export type { BuildKind };
 
@@ -32,15 +39,15 @@ type SelfToolCardProps = {
   emoji?: string;
   gold?: number;
   xp?: number;
+  exploredCells?: number;
+  stone?: number;
+  wood?: number;
+  food?: number;
+  population?: number;
   x: number;
   y: number;
-  terrain?: Terrain;
   isLand?: boolean;
-  resourceType?: ResourceType;
   tileOccupied?: boolean;
-  tooCloseToStructure?: boolean;
-  claimedBySelf?: boolean;
-  shore?: boolean;
   busy?: boolean;
   onBuildSelect?: (kind: BuildKind) => void;
 };
@@ -70,23 +77,14 @@ function BuildGrid({
     entry,
     avail: getBuildAvailability(entry.id, ctx),
   }));
-  const flagReason = rows.find((r) => r.entry.id === "flag")?.avail;
   const hint = ctx.occupied
     ? "This tile already has a building"
-    : flagReason && !flagReason.ok
-      ? flagReason.reason
-      : "Tap an icon to build on this tile";
+    : "Tap an icon to build on this tile";
 
   return (
     <div className="space-y-2">
-      <p
-        className={`text-[10px] leading-snug ${
-          flagReason && !flagReason.ok ? "text-red-600" : "text-stone-500"
-        }`}
-      >
-        {hint}
-      </p>
-      <div className="grid grid-cols-3 gap-1.5">
+      <p className="text-[10px] leading-snug text-stone-500">{hint}</p>
+      <div className="grid grid-cols-2 gap-1.5">
         {rows.map(({ entry, avail }) => {
           const disabled = busy || !avail.ok;
           return (
@@ -101,11 +99,8 @@ function BuildGrid({
               <span className="text-lg leading-none" aria-hidden>
                 {entry.icon}
               </span>
-              <span className="text-[10px] font-medium leading-none">
-                {entry.label}
-              </span>
               {entry.costLabel ? (
-                <span className="text-[9px] leading-none text-stone-400">
+                <span className="text-center text-[9px] leading-tight text-stone-500">
                   {entry.costLabel}
                 </span>
               ) : (
@@ -146,15 +141,15 @@ export function SelfToolCard({
   emoji,
   gold,
   xp,
+  exploredCells,
+  stone,
+  wood,
+  food,
+  population,
   x,
   y,
-  terrain,
   isLand = true,
-  resourceType = "none",
   tileOccupied,
-  tooCloseToStructure,
-  claimedBySelf,
-  shore,
   busy,
   onBuildSelect,
 }: SelfToolCardProps) {
@@ -162,37 +157,43 @@ export function SelfToolCard({
 
   const buildCtx = useMemo<BuildAvailabilityContext>(
     () => ({
-      terrain,
       isLand,
-      resourceType,
       occupied: Boolean(tileOccupied),
-      tooCloseToStructure: Boolean(tooCloseToStructure),
       gold: gold ?? 0,
-      claimedBySelf: Boolean(claimedBySelf),
-      shore: Boolean(shore),
+      stone: stone ?? 0,
+      wood: wood ?? 0,
+      food: food ?? 0,
+      population: population ?? 0,
     }),
-    [
-      terrain,
-      isLand,
-      resourceType,
-      tileOccupied,
-      tooCloseToStructure,
-      gold,
-      claimedBySelf,
-      shore,
-    ],
+    [isLand, tileOccupied, gold, stone, wood, food, population],
   );
 
   return (
-    <div className="pointer-events-auto flex w-56 max-h-[min(320px,70vh)] flex-col overflow-hidden rounded-xl border border-stone-200 bg-white/95 shadow-lg backdrop-blur">
+    <div className="pointer-events-auto flex w-56 max-h-[min(360px,75vh)] flex-col overflow-hidden rounded-xl border border-stone-200 bg-white/95 shadow-lg backdrop-blur">
       <div className="shrink-0 border-b border-stone-100 p-3 pb-2">
         <div className="mb-1 flex min-w-0 items-center gap-2">
           <EmojiFace emoji={face} size={32} />
           <p className="truncate text-sm font-medium text-pink-600">{name}</p>
         </div>
-        <p className="text-xs text-pink-600">
-          ({x}, {y}) · {gold ?? 0}g · XP {xp ?? 0}
+        <p className="text-[11px] leading-snug text-pink-600">
+          ({x}, {y})
         </p>
+        <ResourceRow
+          className="text-[11px] leading-snug text-stone-700"
+          skipZero={false}
+          parts={[
+            ["gold", gold ?? 0],
+            ["stone", stone ?? 0],
+            ["wood", wood ?? 0],
+            ["food", food ?? 0],
+            ["population", population ?? 0],
+            ["xp", xp ?? 0],
+          ]}
+        />
+        <ExploredStat
+          className="mt-1 text-[11px] leading-snug text-stone-700"
+          cells={exploredCells}
+        />
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -210,12 +211,19 @@ const TYPE_LABEL: Record<string, string> = {
   flag: "Flag",
   waypoint: "Flag",
   town: "Town",
+  mine: "Quarry",
+  farm: "Farm",
+  lumber: "Lumber",
+  fishery: "Fishery",
 };
 
 export { TYPE_LABEL };
 
 type FlagCardProps = {
   flag: SelectedFlag;
+  canRename?: boolean;
+  renaming?: boolean;
+  onRename?: (name: string) => void;
 };
 
 function formatCreatedAt(iso: string | null) {
@@ -231,7 +239,85 @@ function formatCreatedAt(iso: string | null) {
   });
 }
 
-export function FlagCard({ flag }: FlagCardProps) {
+function RenameField({
+  currentName,
+  busy,
+  onRename,
+}: {
+  currentName: string;
+  busy?: boolean;
+  onRename: (name: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(currentName);
+
+  useEffect(() => {
+    setValue(currentName);
+  }, [currentName]);
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => setEditing(true)}
+        className="mt-2 w-full rounded-lg border border-stone-200 py-1 text-[11px] text-stone-600 hover:bg-stone-50 disabled:opacity-50"
+      >
+        Rename
+      </button>
+    );
+  }
+
+  const trimmed = value.trim();
+  const valid = trimmed.length >= 1 && trimmed.length <= BUILDING_NAME_MAX;
+
+  return (
+    <form
+      className="mt-2 space-y-1.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!valid || busy) return;
+        onRename(trimmed);
+        setEditing(false);
+      }}
+    >
+      <input
+        autoFocus
+        maxLength={BUILDING_NAME_MAX}
+        value={value}
+        disabled={busy}
+        onChange={(e) => setValue(e.target.value)}
+        className="w-full rounded-lg border border-stone-300 px-2 py-1 text-xs text-stone-900"
+      />
+      <div className="flex gap-1">
+        <button
+          type="button"
+          onClick={() => {
+            setValue(currentName);
+            setEditing(false);
+          }}
+          className="flex-1 rounded border border-stone-200 py-1 text-[11px] text-stone-600 hover:bg-stone-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={busy || !valid}
+          className="flex-1 rounded bg-stone-900 py-1 text-[11px] text-white disabled:opacity-50"
+        >
+          Save
+        </button>
+      </div>
+    </form>
+  );
+}
+
+export function FlagCard({
+  flag,
+  canRename,
+  renaming,
+  onRename,
+}: FlagCardProps) {
   const side = influenceSide(flag.tollRadius ?? FLAG_RANGE_RADIUS);
   const ownerEmoji = normalizePlayerEmoji(flag.ownerEmoji);
   return (
@@ -258,17 +344,32 @@ export function FlagCard({ flag }: FlagCardProps) {
         Created: {formatCreatedAt(flag.createdAt)}
       </p>
       <p className="mt-1 text-[11px] text-stone-500">
-        Influence {side}×{side} (centered on flag)
+        Influence {side}×{side} · {FLAG_TOLL} gold toll
       </p>
+      {canRename && onRename ? (
+        <RenameField
+          currentName={flag.name}
+          busy={renaming}
+          onRename={onRename}
+        />
+      ) : null}
     </div>
   );
 }
 
 type TownCardProps = {
   town: SelectedTown;
+  canRename?: boolean;
+  renaming?: boolean;
+  onRename?: (name: string) => void;
 };
 
-export function TownCard({ town }: TownCardProps) {
+export function TownCard({
+  town,
+  canRename,
+  renaming,
+  onRename,
+}: TownCardProps) {
   const ownerEmoji = normalizePlayerEmoji(town.ownerEmoji);
   const side = influenceSide(town.tollRadius ?? FLAG_RANGE_RADIUS);
   return (
@@ -296,14 +397,22 @@ export function TownCard({ town }: TownCardProps) {
         Created: {formatCreatedAt(town.createdAt)}
       </p>
       <p className="mt-1 text-[11px] text-stone-500">
-        Influence {side}×{side} (centered on town)
+        Influence {side}×{side} · {TOWN_TOLL} gold (drinking)
       </p>
+      {canRename && onRename ? (
+        <RenameField
+          currentName={town.name}
+          busy={renaming}
+          onRename={onRename}
+        />
+      ) : null}
     </div>
   );
 }
 
 type DialogProps = {
   kind: BuildKind;
+  ownerName: string;
   busy?: boolean;
   onConfirm: (name: string) => void;
   onCancel: () => void;
@@ -311,19 +420,24 @@ type DialogProps = {
 
 export function BuildNameDialog({
   kind,
+  ownerName,
   busy,
   onConfirm,
   onCancel,
 }: DialogProps) {
-  const [value, setValue] = useState("");
+  const named = isNamedBuildKind(kind);
+  const [value, setValue] = useState(() =>
+    named ? suggestedBuildingName(ownerName) : "",
+  );
   const title =
     kind === "flag"
       ? "Build flag"
       : kind === "town"
         ? "Build town"
         : `Build ${kind}`;
+
   const trimmed = value.trim();
-  const valid = trimmed.length >= 1 && trimmed.length <= 24;
+  const valid = trimmed.length >= 1 && trimmed.length <= BUILDING_NAME_MAX;
 
   return (
     <div className="pointer-events-auto fixed inset-0 z-[200] flex items-center justify-center bg-black/35 p-4">
@@ -340,22 +454,21 @@ export function BuildNameDialog({
           {title}
         </h2>
         <p className="mt-1 text-xs text-stone-500">
-          Enter a name (1–24 characters)
+          Suggested place name — edit if you like (1–{BUILDING_NAME_MAX}{" "}
+          characters).
         </p>
         <input
           autoFocus
-          className="mt-3 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm"
+          className="mt-3 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm text-stone-900"
           value={value}
-          maxLength={24}
+          maxLength={BUILDING_NAME_MAX}
           disabled={busy}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
-            // Ignore Enter while IME is composing (e.g. Chinese candidate confirm).
             if (e.nativeEvent.isComposing || e.keyCode === 229) return;
             if (e.key === "Enter" && valid && !busy) onConfirm(trimmed);
             if (e.key === "Escape") onCancel();
           }}
-          placeholder={kind === "flag" ? "Flag name" : "Town name"}
         />
         <div className="mt-3 flex gap-2">
           <button

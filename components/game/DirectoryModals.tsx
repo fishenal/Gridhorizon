@@ -5,6 +5,8 @@ import {
   buildingEmoji,
   normalizePlayerEmoji,
 } from "@/lib/game/playerStyle";
+import { ExploredStat } from "@/components/game/ExploredStat";
+import { ResourceRow } from "@/components/game/ResourceRow";
 
 export type DirectoryPlayer = {
   id: number;
@@ -15,7 +17,9 @@ export type DirectoryPlayer = {
   y: number;
   status: string;
   xp: number;
+  exploredCells?: number;
   gold: number;
+  population?: number;
   online: boolean;
   createdAt: string;
 };
@@ -173,8 +177,21 @@ export function AllPlayersModal({ onClose, onPlayerClick }: PlayersModalProps) {
                     </span>
                   </p>
                   <p className="text-xs text-pink-600">
-                    ({p.x}, {p.y}) · {p.gold}g · XP {p.xp}
+                    ({p.x}, {p.y})
                   </p>
+                  <ResourceRow
+                    className="mt-0.5 text-xs text-stone-600"
+                    skipZero={false}
+                    parts={[
+                      ["gold", p.gold],
+                      ["population", p.population ?? 0],
+                      ["xp", p.xp],
+                    ]}
+                  />
+                  <ExploredStat
+                    className="mt-0.5 text-xs text-stone-600"
+                    cells={p.exploredCells}
+                  />
                   {p.bubble ? (
                     <p className="mt-0.5 line-clamp-2 text-[11px] text-stone-600">
                       {p.bubble}

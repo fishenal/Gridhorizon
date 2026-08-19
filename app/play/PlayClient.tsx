@@ -12,6 +12,7 @@ import { MovePad, type TravelProgress } from "@/components/game/MovePad";
 import { Minimap } from "@/components/game/Minimap";
 import { OnlinePlayers, type OnlinePlayer } from "@/components/game/OnlinePlayers";
 import { PlayerStatusPanel } from "@/components/game/PlayerStatusPanel";
+import { HelpModal } from "@/components/game/HelpModal";
 import {
   PlayerProfileModal,
   type PlayerProfileTarget,
@@ -30,16 +31,13 @@ import {
 } from "@/components/game/UserCard";
 import { MapPointPopup } from "@/components/game/MapPointPopup";
 import { OpenSourceFooter } from "@/components/OpenSourceFooter";
-import { generateTile, hasWaterNeighbor } from "@/lib/map/generator";
+import { generateTile } from "@/lib/map/generator";
 import {
   FLAG_RANGE_RADIUS,
   normalizeBubble,
   normalizePlayerEmoji,
 } from "@/lib/game/playerStyle";
-import {
-  buildNeedsName,
-  getBuildEntry,
-} from "@/lib/game/buildCatalog";
+import { buildNeedsName, applyBuildWallet } from "@/lib/game/buildCatalog";
 import { ZoomSlider } from "@/components/game/ZoomSlider";
 import {
   JournalPanel,
@@ -54,23 +52,29 @@ import {
   rebuildLocalViewportTiles,
   type TileOverlay,
 } from "@/lib/map/localFog";
-import { VISION_RADIUS, WORLD_SEED, WAYPOINT_TOLL, XP_BUILD, XP_PER_STEP, FLAG_COST, MINE_COST } from "@/lib/map/constants";
+import { TollNoticeModal } from "@/components/game/TollNoticeModal";
+import { WorkOfferModal, type WorkOffer } from "@/components/game/WorkOfferModal";
+import { VISION_RADIUS, WORLD_SEED, XP_BUILD, XP_PER_STEP } from "@/lib/map/constants";
+import { isSpacedStructureType } from "@/lib/game/structureSpacing";
 import {
-  isSpacedStructureType,
-  isTooCloseToAnyStructure,
-  STRUCTURE_TOO_CLOSE_MSG,
-} from "@/lib/game/structureSpacing";
+  isWorkplaceBuildingType,
+  type WorkJobView,
+} from "@/lib/game/workplaceMeta";
 import {
+  defaultTollAmount,
   defaultTollRadius,
   findTollEntries,
+  isInStructureRange,
   type TollStructure,
 } from "@/lib/game/structureToll";
+import { type TollNotice } from "@/lib/game/tollNotice";
 import { xpForToll } from "@/lib/game/xp";
 import {
   isMapRealtimeMessage,
   mapChannelName,
   type BuildMessage,
   type PresenceMember,
+  type TollMessage,
 } from "@/lib/ably/channels";
 import { closeAblyClient, getAblyClient } from "@/lib/ably/client";
 import {
@@ -92,10 +96,12 @@ type MeResponse = {
     y: number;
     gold: number;
     xp: number;
+    exploredCells?: number;
     stone: number;
     wood: number;
-    ore: number;
     food: number;
+    population: number;
+    ore: number;
     status: string;
     emoji: string;
     bubble?: string;
@@ -109,6 +115,7 @@ type MeResponse = {
     origin: { x: number; y: number };
     target: { x: number; y: number };
   } | null;
+  work?: WorkJobView | null;
   friends: Array<{ id: number; name: string; x: number; y: number }>;
   map?: { id: number; slug: string; name: string; seed: number; size: number };
   config: {
@@ -174,6 +181,11 @@ export default function PlayClient() {
   const [directory, setDirectory] = useState<"players" | "assets" | null>(
     null,
   );
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [workOffer, setWorkOffer] = useState<WorkOffer | null>(null);
+  const [workBusy, setWorkBusy] = useState(false);
+  const [tollNotices, setTollNotices] = useState<TollNotice[]>([]);
+  const tollNoticeSeqRef = useRef(0);
   const [travelProgress, setTravelProgress] = useState<TravelProgress | null>(
     null,
   );
@@ -199,6 +211,10 @@ export default function PlayClient() {
   const displayPosRef = useRef<Point | null>(null);
   const playerIdRef = useRef<number | null>(null);
   const goldRef = useRef(0);
+  const workRef = useRef<WorkJobView | null>(null);
+  const dismissedWorkRef = useRef<Set<number>>(new Set());
+  const workOfferRef = useRef<WorkOffer | null>(null);
+  const onStopWorkRef = useRef<() => void>(() => {});
   const exploredRef = useRef<Set<string>>(new Set());
   const overlaysRef = useRef<Map<string, TileOverlay>>(new Map());
   const worldSeedRef = useRef(WORLD_SEED);
@@ -229,7 +245,7 @@ export default function PlayClient() {
     publishPos: (pos: Point, status: string) => void;
     publishBubble: (bubble: string) => void;
     publishBuild: (msg: Omit<BuildMessage, "type">) => void;
-    publishToll: (toPlayerId: number, amount: number) => void;
+    publishToll: (msg: Omit<TollMessage, "type">) => void;
   } | null>(null);
 
   const pushLocalLog = useCallback(
@@ -323,33 +339,9 @@ export default function PlayClient() {
     });
   }, []);
 
-  /** Client-side spacing check against known map overlays (server still authoritative). */
-  const localTooCloseToStructure = useCallback((x: number, y: number) => {
-    const nearby: Point[] = [];
-    for (const [key, overlay] of overlaysRef.current) {
-      const b = overlay.building;
-      if (!b || !isSpacedStructureType(b.type)) continue;
-      const comma = key.indexOf(",");
-      if (comma < 0) continue;
-      const sx = Number(key.slice(0, comma));
-      const sy = Number(key.slice(comma + 1));
-      if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
-      nearby.push({ x: sx, y: sy });
-    }
-    return isTooCloseToAnyStructure(x, y, nearby);
-  }, []);
-
   const trySelectBuild = useCallback(
     (kind: BuildKind) => {
       if (!me || travelingRef.current) return;
-      const entry = getBuildEntry(kind);
-      // Spaced structures: client hint lives in BuildGrid; don't sticky-banner.
-      if (
-        entry.spaced &&
-        localTooCloseToStructure(me.player.x, me.player.y)
-      ) {
-        return;
-      }
       setError("");
       if (buildNeedsName(kind)) {
         setPendingBuild(kind);
@@ -357,7 +349,7 @@ export default function PlayClient() {
         confirmBuildRef.current(kind, "");
       }
     },
-    [localTooCloseToStructure, me],
+    [me],
   );
 
   /** Known flag/town/waypoint overlays for local toll preview. */
@@ -379,7 +371,32 @@ export default function PlayClient() {
         ownerId: b.ownerId,
         type: b.type,
         name: b.name ?? null,
-        amount: WAYPOINT_TOLL,
+        amount: defaultTollAmount(b.tollAmount, b.type),
+        ownerName: b.ownerName,
+      });
+    }
+    return out;
+  }, []);
+
+  const collectLocalWorkplaces = useCallback((): TollStructure[] => {
+    const out: TollStructure[] = [];
+    for (const [key, overlay] of overlaysRef.current) {
+      const b = overlay.building;
+      if (!b || !isWorkplaceBuildingType(b.type) || b.id <= 0) continue;
+      const comma = key.indexOf(",");
+      if (comma < 0) continue;
+      const sx = Number(key.slice(0, comma));
+      const sy = Number(key.slice(comma + 1));
+      if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+      out.push({
+        id: b.id,
+        x: sx,
+        y: sy,
+        radius: defaultTollRadius(b.tollRadius),
+        ownerId: b.ownerId,
+        type: b.type,
+        name: b.name ?? null,
+        amount: 0,
         ownerName: b.ownerName,
       });
     }
@@ -402,14 +419,38 @@ export default function PlayClient() {
       // Optimistic gold + XP only — log comes from server after settle.
       let gold = goldRef.current;
       let tollXp = 0;
-      const ownerNotices: Array<{ ownerId: number; amount: number }> = [];
-      for (const { structure: b } of entries) {
+      const paid: Array<{ structure: TollStructure; at: Point }> = [];
+      for (const { structure: b, at } of entries) {
         if (b.amount <= 0 || gold < b.amount) break;
         gold -= b.amount;
         tollXp += xpForToll(b.amount);
-        ownerNotices.push({ ownerId: b.ownerId, amount: b.amount });
+        paid.push({ structure: b, at });
       }
-      if (gold === goldRef.current && tollXp === 0) return;
+      if (paid.length === 0) return;
+
+      const payerNotices: TollNotice[] = paid.map(({ structure: b }) => {
+        tollNoticeSeqRef.current += 1;
+        return {
+          id: tollNoticeSeqRef.current,
+          role: "payer",
+          buildingType: b.type,
+          buildingName: b.name,
+          otherPlayerName: b.ownerName?.trim() || "another traveler",
+          amount: b.amount,
+        };
+      });
+      setTollNotices((prev) => [...prev, ...payerNotices]);
+      for (const { structure: b, at } of paid) {
+        pushLocalLog("toll_paid", {
+          amount: b.amount,
+          buildingType: b.type,
+          buildingName: b.name,
+          buildingId: b.id,
+          ownerId: b.ownerId,
+          ownerName: b.ownerName ?? "someone",
+          at,
+        });
+      }
 
       goldRef.current = gold;
       setMe((prev) => {
@@ -443,12 +484,26 @@ export default function PlayClient() {
                     typeof data.player.xp === "number"
                       ? data.player.xp
                       : prev.player.xp,
+                  exploredCells:
+                    typeof data.player.exploredCells === "number"
+                      ? data.player.exploredCells
+                      : prev.player.exploredCells,
                 },
               };
             });
           }
-          for (const n of ownerNotices) {
-            publishRealtimeRef.current?.publishToll(n.ownerId, n.amount);
+          const fromName = meMetaRef.current?.name ?? "A traveler";
+          const fromId = playerIdRef.current ?? 0;
+          for (const { structure: b } of paid) {
+            publishRealtimeRef.current?.publishToll({
+              toPlayerId: b.ownerId,
+              amount: b.amount,
+              fromPlayerId: fromId,
+              fromPlayerName: fromName,
+              buildingType: b.type,
+              buildingName: b.name,
+              buildingId: b.id,
+            });
           }
           setJournalTick((t) => t + 1);
         } catch {
@@ -456,7 +511,52 @@ export default function PlayClient() {
         }
       })();
     },
-    [collectLocalTollStructures],
+    [collectLocalTollStructures, pushLocalLog],
+  );
+
+  const applyLocalWorkplaceEntries = useCallback(
+    (previous: Point, next: Point) => {
+      const travelerId = playerIdRef.current;
+      if (!travelerId) return;
+      const entries = findTollEntries(
+        previous,
+        [next],
+        collectLocalWorkplaces(),
+        travelerId,
+      );
+      if (entries.length === 0) return;
+
+      const currentWork = workRef.current;
+      for (const { structure: b } of entries) {
+        if (dismissedWorkRef.current.has(b.id)) continue;
+        if (currentWork?.buildingId === b.id) continue;
+        if (workOfferRef.current?.buildingId === b.id) continue;
+        const offer: WorkOffer = {
+          buildingId: b.id,
+          buildingType: b.type,
+          buildingName: b.name,
+          ownerName: b.ownerName?.trim() || "another traveler",
+          x: b.x,
+          y: b.y,
+          radius: b.radius,
+        };
+        pushLocalLog("work_offer", {
+          buildingId: offer.buildingId,
+          buildingType: offer.buildingType,
+          buildingName: offer.buildingName,
+          ownerName: offer.ownerName,
+          x: offer.x,
+          y: offer.y,
+          radius: offer.radius,
+          status: "pending",
+        });
+        if (!workOfferRef.current) {
+          workOfferRef.current = offer;
+          setWorkOffer(offer);
+        }
+      }
+    },
+    [collectLocalWorkplaces, pushLocalLog],
   );
 
   const syncExploredAt = useCallback(
@@ -597,17 +697,23 @@ export default function PlayClient() {
         if (prev.id !== playerIdRef.current) return prev;
         return { ...prev, x: pos.x, y: pos.y };
       });
-      // Drop sticky spacing banner once the player leaves the blocked zone.
-      if (!localTooCloseToStructure(pos.x, pos.y)) {
-        setError((prev) =>
-          prev === STRUCTURE_TOO_CLOSE_MSG ? "" : prev,
-        );
-      }
       setExploredRevision((n) => n + 1);
       void syncExploredAt(pos);
       publishRealtimeRef.current?.publishPos(pos, status);
+      const job = workRef.current;
+      if (
+        job &&
+        !isInStructureRange(pos.x, pos.y, job.x, job.y, job.radius)
+      ) {
+        onStopWorkRef.current();
+      }
+      for (const wp of collectLocalWorkplaces()) {
+        if (!isInStructureRange(pos.x, pos.y, wp.x, wp.y, wp.radius)) {
+          dismissedWorkRef.current.delete(wp.id);
+        }
+      }
     },
-    [rebuildFogAt, syncExploredAt, localTooCloseToStructure],
+    [rebuildFogAt, syncExploredAt, collectLocalWorkplaces],
   );
 
   const updateTravelProgress = useCallback((index: number, pathLen: number) => {
@@ -704,6 +810,7 @@ export default function PlayClient() {
 
       playerIdRef.current = meData.player.id;
       goldRef.current = meData.player.gold;
+      workRef.current = meData.work ?? null;
       worldSeedRef.current = meData.config.worldSeed ?? worldSeedRef.current;
       visionRadiusRef.current =
         meData.config.visionRadius ?? visionRadiusRef.current;
@@ -734,6 +841,8 @@ export default function PlayClient() {
         ...meData,
         player: {
           ...meData.player,
+          population:
+            meData.player.population ?? meData.player.ore ?? 0,
           x: display.x,
           y: display.y,
           status: travelingRef.current || resumeTravel
@@ -742,6 +851,7 @@ export default function PlayClient() {
         },
         // Keep travel payload only until local timer owns the trip
         travel: travelingRef.current || resumeTravel ? meData.travel : null,
+        work: meData.work ?? null,
         config: meData.config,
         map: meData.map ?? prev?.map,
       }));
@@ -850,6 +960,14 @@ export default function PlayClient() {
   softRefreshRef.current = () => {
     void softRefresh();
   };
+
+  useEffect(() => {
+    if (!me?.work?.buildingId) return;
+    const t = window.setInterval(() => {
+      void softRefreshRef.current();
+    }, 60_000);
+    return () => window.clearInterval(t);
+  }, [me?.work?.buildingId]);
 
   useEffect(() => {
     void softRefresh();
@@ -996,6 +1114,26 @@ export default function PlayClient() {
       }
       if (msg.type === "toll") {
         if (msg.toPlayerId !== selfId) return;
+        tollNoticeSeqRef.current += 1;
+        setTollNotices((prev) => [
+          ...prev,
+          {
+            id: tollNoticeSeqRef.current,
+            role: "owner",
+            buildingType: msg.buildingType ?? "flag",
+            buildingName: msg.buildingName ?? null,
+            otherPlayerName: msg.fromPlayerName?.trim() || "A traveler",
+            amount: msg.amount,
+          },
+        ]);
+        pushLocalLog("toll_received", {
+          amount: msg.amount,
+          buildingType: msg.buildingType ?? "flag",
+          buildingName: msg.buildingName ?? null,
+          buildingId: msg.buildingId,
+          fromPlayerId: msg.fromPlayerId,
+          fromPlayerName: msg.fromPlayerName ?? "a traveler",
+        });
         setJournalTick((t) => t + 1);
         softRefreshRef.current();
       }
@@ -1070,14 +1208,10 @@ export default function PlayClient() {
             // ignore
           }
         },
-        publishToll: (toPlayerId, amount) => {
+        publishToll: (body) => {
           if (!ablyReadyRef.current) return;
           try {
-            void channel.publish("toll", {
-              type: "toll",
-              toPlayerId,
-              amount,
-            });
+            void channel.publish("toll", { type: "toll", ...body });
           } catch {
             // ignore
           }
@@ -1250,6 +1384,7 @@ export default function PlayClient() {
       const prevPos = p[next - 1];
       if (prevPos) {
         applyLocalTollEntries(prevPos, pos);
+        applyLocalWorkplaceEntries(prevPos, pos);
       }
       updateTravelProgress(next, p.length);
       if (next >= p.length - 1) {
@@ -1294,6 +1429,110 @@ export default function PlayClient() {
       void softRefresh();
     })();
   }
+
+  function onCancelWorkOffer() {
+    const offer = workOfferRef.current;
+    if (offer) dismissedWorkRef.current.add(offer.buildingId);
+    workOfferRef.current = null;
+    setWorkOffer(null);
+  }
+
+  async function startWorkAt(offer: WorkOffer) {
+    if (workBusy) return;
+    setWorkBusy(true);
+    if (travelingRef.current) {
+      onStopTravel();
+    }
+    try {
+      const res = await fetch("/api/work", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "start", buildingId: offer.buildingId }),
+      });
+      const data = await readJson<{ error?: string; work?: WorkJobView }>(res);
+      if (!res.ok || !data?.work) {
+        setError(data?.error ?? "Could not start work");
+        return;
+      }
+      workRef.current = data.work;
+      if (workOfferRef.current?.buildingId === offer.buildingId) {
+        workOfferRef.current = null;
+        setWorkOffer(null);
+      }
+      setMe((prev) => (prev ? { ...prev, work: data.work! } : prev));
+      setLocalLogs((prev) =>
+        prev.map((e) =>
+          e.type === "work_offer" && e.payload.buildingId === offer.buildingId
+            ? { ...e, payload: { ...e.payload, status: "accepted" } }
+            : e,
+        ),
+      );
+    } catch {
+      setError("Could not start work");
+    } finally {
+      setWorkBusy(false);
+    }
+  }
+
+  function onAcceptWork() {
+    const offer = workOfferRef.current;
+    if (!offer) return;
+    void startWorkAt(offer);
+  }
+
+  function onAcceptWorkFromLog(buildingId: number) {
+    const wp = collectLocalWorkplaces().find((w) => w.id === buildingId);
+    if (wp) {
+      void startWorkAt({
+        buildingId: wp.id,
+        buildingType: wp.type,
+        buildingName: wp.name,
+        ownerName: wp.ownerName?.trim() || "another traveler",
+        x: wp.x,
+        y: wp.y,
+        radius: wp.radius,
+      });
+      return;
+    }
+    const fromLog = localLogs.find(
+      (e) => e.type === "work_offer" && e.payload.buildingId === buildingId,
+    );
+    if (!fromLog) {
+      setError("That workplace is no longer in view");
+      return;
+    }
+    const p = fromLog.payload;
+    void startWorkAt({
+      buildingId,
+      buildingType: String(p.buildingType ?? "farm"),
+      buildingName:
+        typeof p.buildingName === "string" ? p.buildingName : null,
+      ownerName:
+        typeof p.ownerName === "string" ? p.ownerName : "another traveler",
+      x: typeof p.x === "number" ? p.x : 0,
+      y: typeof p.y === "number" ? p.y : 0,
+      radius: typeof p.radius === "number" ? p.radius : 5,
+    });
+  }
+
+  function onStopWork() {
+    if (!workRef.current) return;
+    workRef.current = null;
+    setMe((prev) => (prev ? { ...prev, work: null } : prev));
+    void (async () => {
+      try {
+        await fetch("/api/work", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "stop" }),
+        });
+      } catch {
+        // ignore
+      }
+      void softRefresh();
+    })();
+  }
+  onStopWorkRef.current = onStopWork;
 
   async function onDirectionalMove(dx: number, dy: number, steps: number) {
     if (!me || travelingRef.current) return;
@@ -1386,11 +1625,6 @@ export default function PlayClient() {
     if (!me || travelingRef.current) return;
     const x = me.player.x;
     const y = me.player.y;
-    const entry = getBuildEntry(kind);
-    if (entry.spaced && localTooCloseToStructure(x, y)) {
-      setPendingBuild(null);
-      return;
-    }
     setBusy(true);
     setError("");
     const buildName = name.trim() || null;
@@ -1421,14 +1655,27 @@ export default function PlayClient() {
       // Optimistic map marker + XP before softRefresh returns
       setMe((prev) => {
         if (!prev) return prev;
-        const goldCost =
-          kind === "flag" ? FLAG_COST : kind === "mine" ? MINE_COST : 0;
+        const next = applyBuildWallet(
+          {
+            gold: prev.player.gold,
+            stone: prev.player.stone,
+            wood: prev.player.wood,
+            food: prev.player.food,
+            population: prev.player.population ?? prev.player.ore ?? 0,
+          },
+          kind,
+        );
         return {
           ...prev,
           player: {
             ...prev.player,
             xp: prev.player.xp + XP_BUILD,
-            gold: Math.max(0, prev.player.gold - goldCost),
+            gold: next.gold,
+            stone: next.stone,
+            wood: next.wood,
+            food: next.food,
+            population: next.population,
+            ore: next.population,
           },
         };
       });
@@ -1444,7 +1691,17 @@ export default function PlayClient() {
           message: buildName,
           createdAt: new Date().toISOString(),
           tollRadius:
-            kind === "flag" || kind === "town" ? FLAG_RANGE_RADIUS : null,
+            kind === "flag" ||
+            kind === "town" ||
+            kind === "mine" ||
+            kind === "farm" ||
+            kind === "lumber"
+              ? FLAG_RANGE_RADIUS
+              : null,
+          tollAmount:
+            kind === "flag" || kind === "town"
+              ? defaultTollAmount(null, kind)
+              : null,
         },
         claim: overlaysRef.current.get(`${x},${y}`)?.claim ?? null,
       });
@@ -1459,6 +1716,7 @@ export default function PlayClient() {
           : prev,
       );
       setExploredRevision((n) => n + 1);
+      setJournalTick((t) => t + 1);
       publishRealtimeRef.current?.publishBuild({
         buildingType: kind,
         x,
@@ -1468,7 +1726,13 @@ export default function PlayClient() {
         ownerEmoji: normalizePlayerEmoji(me.player.emoji),
         name: buildName,
         tollRadius:
-          kind === "flag" || kind === "town" ? FLAG_RANGE_RADIUS : null,
+          kind === "flag" ||
+          kind === "town" ||
+          kind === "mine" ||
+          kind === "farm" ||
+          kind === "lumber"
+            ? FLAG_RANGE_RADIUS
+            : null,
       });
       void softRefresh();
     } catch {
@@ -1481,6 +1745,57 @@ export default function PlayClient() {
   confirmBuildRef.current = (kind, name) => {
     void onConfirmBuild(kind, name);
   };
+
+  async function onRenameBuilding(buildingId: number, name: string) {
+    const trimmed = name.trim();
+    if (!me || buildingId <= 0 || trimmed.length < 1) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/buildings/${buildingId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      const data = await readJson<{ error?: string; name?: string }>(res);
+      if (!res.ok) {
+        setError(data?.error ?? "Could not rename");
+        return;
+      }
+      const nextName = data?.name ?? trimmed;
+      for (const [key, overlay] of overlaysRef.current) {
+        if (overlay.building?.id === buildingId) {
+          overlaysRef.current.set(key, {
+            ...overlay,
+            building: {
+              ...overlay.building,
+              name: nextName,
+              message: nextName,
+            },
+          });
+        }
+      }
+      setSelection((prev) => {
+        if (!prev || (prev.type !== "flag" && prev.type !== "town")) {
+          return prev;
+        }
+        if (prev.id !== buildingId) return prev;
+        return { ...prev, name: nextName };
+      });
+      const pos = displayPosRef.current ?? {
+        x: me.player.x,
+        y: me.player.y,
+      };
+      setViewport((prev) =>
+        prev ? { ...prev, tiles: rebuildFogAt(pos) } : prev,
+      );
+      setJournalTick((t) => t + 1);
+    } catch {
+      setError("Could not rename");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function onEmojiChange(emoji: string) {
     if (!me) return;
@@ -1583,23 +1898,6 @@ export default function PlayClient() {
       selection.id === me.player.id &&
       selfOverlay?.building,
   );
-  const selfClaimedBySelf = Boolean(
-    selection?.type === "player" &&
-      selection.id === me.player.id &&
-      selfOverlay?.claim?.ownerId === me.player.id,
-  );
-  const selfShore =
-    selection?.type === "player" && selection.id === me.player.id
-      ? hasWaterNeighbor(
-          me.player.x,
-          me.player.y,
-          me.config.worldSeed ?? WORLD_SEED,
-        )
-      : false;
-  const selfTooClose =
-    selection?.type === "player" &&
-    selection.id === me.player.id &&
-    localTooCloseToStructure(me.player.x, me.player.y);
 
   const popupAnchor = (() => {
     if (!selection || !anchors.entity) return null;
@@ -1672,6 +1970,13 @@ export default function PlayClient() {
               >
                 Assets
               </button>
+              <button
+                type="button"
+                onClick={() => setHelpOpen(true)}
+                className="rounded-lg border border-stone-200 bg-white/95 px-2.5 py-1.5 text-xs font-medium text-stone-800 shadow-md backdrop-blur hover:bg-stone-50"
+              >
+                Help
+              </button>
             </div>
             <PlayerStatusPanel
               player={{
@@ -1680,12 +1985,19 @@ export default function PlayClient() {
                 bubble: me.player.bubble,
                 gold: me.player.gold,
                 xp: me.player.xp,
+                exploredCells: me.player.exploredCells,
+                stone: me.player.stone,
+                wood: me.player.wood,
+                food: me.player.food,
+                population: me.player.population ?? me.player.ore,
                 x: me.player.x,
                 y: me.player.y,
                 status: me.player.status,
               }}
               refreshToken={journalTick}
-              busy={busy || traveling}
+              busy={busy}
+              working={Boolean(me.work)}
+              onStopWork={onStopWork}
               onNameChange={(name) =>
                 setMe((prev) =>
                   prev
@@ -1723,6 +2035,9 @@ export default function PlayClient() {
               refreshToken={journalTick}
               localLogs={localLogs}
               onLocalLogsMatched={onLocalLogsMatched}
+              workBusy={workBusy}
+              activeWorkBuildingId={me.work?.buildingId ?? null}
+              onAcceptWork={onAcceptWorkFromLog}
             />
           </div>
 
@@ -1738,24 +2053,38 @@ export default function PlayClient() {
               onMouseLeave={scheduleCloseEntity}
             >
               {selection.type === "flag" ? (
-                <FlagCard flag={selection} />
+                <FlagCard
+                  flag={selection}
+                  canRename={selection.ownerId === me.player.id}
+                  renaming={busy}
+                  onRename={(name) =>
+                    void onRenameBuilding(selection.id, name)
+                  }
+                />
               ) : selection.type === "town" ? (
-                <TownCard town={selection} />
+                <TownCard
+                  town={selection}
+                  canRename={selection.ownerId === me.player.id}
+                  renaming={busy}
+                  onRename={(name) =>
+                    void onRenameBuilding(selection.id, name)
+                  }
+                />
               ) : selection.id === me.player.id ? (
                 <SelfToolCard
                   name={selection.name}
                   emoji={me.player.emoji}
                   gold={me.player.gold}
                   xp={me.player.xp ?? 0}
+                  exploredCells={me.player.exploredCells}
+                  stone={me.player.stone}
+                  wood={me.player.wood}
+                  food={me.player.food}
+                  population={me.player.population ?? me.player.ore}
                   x={selection.x}
                   y={selection.y}
-                  terrain={selfTerrain?.terrain}
                   isLand={selfTerrain?.isLand}
-                  resourceType={selfTerrain?.resourceType}
                   tileOccupied={selfOccupied}
-                  tooCloseToStructure={Boolean(selfTooClose)}
-                  claimedBySelf={selfClaimedBySelf}
-                  shore={selfShore}
                   busy={busy || traveling}
                   onBuildSelect={trySelectBuild}
                 />
@@ -1811,9 +2140,29 @@ export default function PlayClient() {
       {pendingBuild ? (
         <BuildNameDialog
           kind={pendingBuild}
+          ownerName={me.player.name}
           busy={busy}
           onCancel={() => setPendingBuild(null)}
           onConfirm={(name) => void onConfirmBuild(pendingBuild, name)}
+        />
+      ) : null}
+
+      {helpOpen ? <HelpModal onClose={() => setHelpOpen(false)} /> : null}
+
+      {workOffer ? (
+        <WorkOfferModal
+          offer={workOffer}
+          busy={workBusy}
+          onWork={() => void onAcceptWork()}
+          onCancel={onCancelWorkOffer}
+        />
+      ) : null}
+
+      {tollNotices[0] ? (
+        <TollNoticeModal
+          notice={tollNotices[0]}
+          remaining={Math.max(0, tollNotices.length - 1)}
+          onDismiss={() => setTollNotices((prev) => prev.slice(1))}
         />
       ) : null}
 

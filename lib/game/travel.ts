@@ -138,7 +138,7 @@ async function settleStructureTollsOnSegment(
     ownerId: b.ownerId,
     type: b.type,
     name: b.name,
-    amount: defaultTollAmount(b.tollAmount),
+    amount: defaultTollAmount(b.tollAmount, b.type),
   }));
 
   const entries = findTollEntries(previous, segment, structures, playerId);
