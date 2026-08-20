@@ -1864,7 +1864,7 @@ export default function PlayClient() {
       <main className="relative flex h-dvh items-center justify-center overflow-hidden text-stone-100">
         <div aria-hidden className="pointer-events-none absolute inset-0">
           <Image
-            src="/home-ocean-horizon.png"
+            src="/home-ocean-horizon.webp"
             alt=""
             fill
             priority
@@ -1915,7 +1915,7 @@ export default function PlayClient() {
     <main className="relative flex h-dvh flex-col overflow-hidden">
       <div aria-hidden className="pointer-events-none absolute inset-0 z-0">
         <Image
-          src="/home-ocean-horizon.png"
+          src="/home-ocean-horizon.webp"
           alt=""
           fill
           priority

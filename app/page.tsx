@@ -12,7 +12,7 @@ export default async function HomePage() {
     <main className="relative flex min-h-full flex-1 flex-col overflow-hidden">
       <div aria-hidden className="pointer-events-none absolute inset-0">
         <Image
-          src="/home-ocean-horizon.png"
+          src="/home-ocean-horizon.webp"
           alt=""
           fill
           priority
